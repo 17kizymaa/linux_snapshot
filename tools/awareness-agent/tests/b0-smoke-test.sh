@@ -258,3 +258,171 @@ echo "[ok] real user .claude not mutated"
 # ============================================================
 echo ""
 echo "[ok] awareness-agent spike B0 smoke test passed"
+
+# ============================================================
+# Section 10: Project path with spaces
+# ============================================================
+echo "=== Section 10: Project path with spaces ==="
+
+PROJECT_WITH_SPACE="$TMP/fake project with spaces"
+mkdir -p "$PROJECT_WITH_SPACE"
+cd "$PROJECT_WITH_SPACE"
+git init -q 2>/dev/null || true
+git config user.email "test@test.local"
+git config user.name "Test"
+echo "print('hello')" > main.py
+git add -A && git commit -q -m "init" 2>/dev/null || true
+
+awareness claude install --project "$PROJECT_WITH_SPACE" --session-start > "$TMP/install-space.txt" 2>&1
+grep -q "ENABLED" "$TMP/install-space.txt"
+
+test -x "$PROJECT_WITH_SPACE/.claude/hooks/awareness-session-start.sh"
+python3 -c "
+import json
+with open('$PROJECT_WITH_SPACE/.claude/plugins/acknowledged-risks.json') as f:
+    d = json.load(f)
+assert d['plugins']['awareness-agent']['session_start'] is True
+"
+
+CONTEXT_SPACE=$(awareness claude session-start --project "$PROJECT_WITH_SPACE" --max-chars 5000 2>/dev/null)
+echo "$CONTEXT_SPACE" > "$TMP/context-space.txt"
+grep -q "<awareness-context>" "$TMP/context-space.txt"
+grep -q "fake project with spaces" "$TMP/context-space.txt"
+
+HOOK_SPACE_OUTPUT=$("$PROJECT_WITH_SPACE/.claude/hooks/awareness-session-start.sh" 2>&1) || true
+if echo "$HOOK_SPACE_OUTPUT" | grep -qi "traceback\|error:\|exception"; then
+  echo "[fail] hook crashed with spaces in path: $HOOK_SPACE_OUTPUT" >&2
+  exit 1
+fi
+
+awareness claude uninstall --project "$PROJECT_WITH_SPACE" >/dev/null 2>&1
+test ! -f "$PROJECT_WITH_SPACE/.claude/commands/awareness.md"
+
+echo "[ok] project path with spaces handled correctly"
+
+# ============================================================
+# Section 11: Uninstall preserves unrelated .claude content
+# ============================================================
+echo "=== Section 11: Uninstall preserves unrelated content ==="
+
+PROJECT_PRESERVE="$TMP/fake-project-preserve"
+mkdir -p "$PROJECT_PRESERVE/.claude/commands" "$PROJECT_PRESERVE/.claude/hooks" "$PROJECT_PRESERVE/.claude/plugins"
+echo "# other command" > "$PROJECT_PRESERVE/.claude/commands/other.md"
+echo "#!/bin/bash" > "$PROJECT_PRESERVE/.claude/hooks/other-hook.sh"
+echo '{"plugins": {"other-plugin": {"enabled": true}}}' > "$PROJECT_PRESERVE/.claude/plugins/acknowledged-risks.json"
+
+awareness claude install --project "$PROJECT_PRESERVE" --session-start >/dev/null 2>&1
+
+test -f "$PROJECT_PRESERVE/.claude/commands/other.md"
+test -f "$PROJECT_PRESERVE/.claude/hooks/other-hook.sh"
+
+python3 -c "
+import json
+with open('$PROJECT_PRESERVE/.claude/plugins/acknowledged-risks.json') as f:
+    d = json.load(f)
+assert 'other-plugin' in d.get('plugins', {}), 'other-plugin section lost'
+assert 'awareness-agent' in d.get('plugins', {}), 'awareness-agent section missing'
+"
+
+awareness claude uninstall --project "$PROJECT_PRESERVE" >/dev/null 2>&1
+test -f "$PROJECT_PRESERVE/.claude/commands/other.md" || { echo "[fail] other.md was removed"; exit 1; }
+test -f "$PROJECT_PRESERVE/.claude/hooks/other-hook.sh" || { echo "[fail] other-hook.sh was removed"; exit 1; }
+
+python3 -c "
+import json
+with open('$PROJECT_PRESERVE/.claude/plugins/acknowledged-risks.json') as f:
+    d = json.load(f)
+assert 'other-plugin' in d.get('plugins', {}), 'other-plugin section lost after uninstall'
+assert 'awareness-agent' not in d.get('plugins', {}), 'awareness-agent section not cleaned'
+"
+
+echo "[ok] uninstall preserves unrelated .claude content"
+
+# ============================================================
+# Section 12: Doctor actionable hints
+# ============================================================
+echo "=== Section 12: Doctor actionable hints ==="
+
+PROJECT_DOCTOR="$TMP/fake-project-doctor"
+mkdir -p "$PROJECT_DOCTOR"
+
+awareness stop >/dev/null 2>&1 || true
+DOCTOR_NO=$(awareness claude doctor --project "$PROJECT_DOCTOR" 2>&1) || true
+echo "$DOCTOR_NO" > "$TMP/doctor-no.txt"
+grep -q "daemon running: False" "$TMP/doctor-no.txt"
+grep -q "run: awareness start" "$TMP/doctor-no.txt"
+
+awareness claude install --project "$PROJECT_DOCTOR" --session-start >/dev/null 2>&1
+DOCTOR_NO_DAEMON=$(awareness claude doctor --project "$PROJECT_DOCTOR" 2>&1) || true
+echo "$DOCTOR_NO_DAEMON" > "$TMP/doctor-no-daemon.txt"
+grep -q "daemon running: False" "$TMP/doctor-no-daemon.txt"
+grep -q "run: awareness start" "$TMP/doctor-no-daemon.txt"
+
+awareness start >/dev/null
+DOCTOR_OK=$(awareness claude doctor --project "$PROJECT_DOCTOR" 2>&1)
+echo "$DOCTOR_OK" > "$TMP/doctor-ok.txt"
+grep -q "daemon running: True" "$TMP/doctor-ok.txt"
+grep -q "all clear" "$TMP/doctor-ok.txt"
+
+echo "[ok] doctor provides actionable hints"
+
+# ============================================================
+# Section 13: Empty memory state
+# ============================================================
+echo "=== Section 13: Empty memory state ==="
+
+PROJECT_EMPTY="$TMP/fake-project-empty"
+mkdir -p "$PROJECT_EMPTY"
+cd "$PROJECT_EMPTY"
+git init -q 2>/dev/null || true
+git config user.email "test@test.local"
+git config user.name "Test"
+
+CONTEXT_EMPTY=$(awareness claude session-start --project "$PROJECT_EMPTY" --max-chars 5000 2>/dev/null)
+echo "$CONTEXT_EMPTY" > "$TMP/context-empty.txt"
+grep -q "<awareness-context>" "$TMP/context-empty.txt"
+grep -q "no stored memories" "$TMP/context-empty.txt"
+
+echo "[ok] empty memory state produces clean message"
+
+# ============================================================
+# Section 14: Control character stripping
+# ============================================================
+echo "=== Section 14: Control character stripping ==="
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    store.remember('note: has\x00null\x07bell\x1b[31mred text', category='note', source='test')
+"
+
+CONTEXT_CTRL=$(awareness claude session-start --project "$PROJECT_EMPTY" --max-chars 5000 2>/dev/null)
+if echo "$CONTEXT_CTRL" | grep -qP '[\x00-\x08\x0e-\x1f]'; then
+  echo "[fail] control characters leaked into context" >&2
+  exit 1
+fi
+if echo "$CONTEXT_CTRL" | grep -qP '\x1b\['; then
+  echo "[fail] ANSI escape sequences leaked into context" >&2
+  exit 1
+fi
+
+echo "[ok] control characters stripped from context output"
+
+# ============================================================
+# Section 15: Untrusted-context framing
+# ============================================================
+echo "=== Section 15: Untrusted-context framing ==="
+
+CONTEXT_FRAME=$(awareness claude session-start --project "$PROJECT_EMPTY" --max-chars 5000 2>/dev/null)
+if ! echo "$CONTEXT_FRAME" | grep -q "untrusted"; then
+  echo "[fail] context missing untrusted framing comment" >&2
+  exit 1
+fi
+
+echo "[ok] context includes untrusted-data framing"
+
+# ============================================================
+echo ""
+echo "[ok] awareness-agent spike B0.1 hardening tests passed"

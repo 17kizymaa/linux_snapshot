@@ -1,16 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
-import shutil
-import stat
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
-from typing import Optional
 
 from .paths import secure_chmod
-from .redaction import redact_text
 from .session_start import build_context_snippet
 
 # ---------------------------------------------------------------------------
@@ -22,7 +16,7 @@ COMMANDS_DIR_NAME = "commands"
 SESSION_START_HOOK_DIR_NAME = "hooks"
 
 # SessionStart hook script content — written to .claude/hooks/awareness-session-start.sh
-SESSION_START_HOOK_SCRIPT = r"""#!/usr/bin/env bash
+SESSION_START_HOOK_SCRIPT = """#!/usr/bin/env bash
 # awareness-session-start.sh — SessionStart hook for awareness-agent
 # Fail-closed: if anything goes wrong, exit 0 with no output (no delay).
 #
@@ -32,73 +26,97 @@ SESSION_START_HOOK_SCRIPT = r"""#!/usr/bin/env bash
 #
 # This hook checks plugin opt-in via .claude/plugins/acknowledged-risks.json.
 # If opt-in is missing, the hook is a silent no-op.
+#
+# Portability: no GNU timeout, no bashisms beyond POSIX. Works on macOS/Linux.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." >/dev/null 2>&1 && pwd)"
-OPT_IN_FILE="$PROJECT_ROOT/.claude/plugins/acknowledged-risks.json"
 
-# Check opt-in — exit silently if not explicitly enabled
-if [ ! -f "$OPT_IN_FILE" ]; then
-  exit 0
-fi
+# Export for the Python child process — avoids shell interpolation of paths
+# that may contain spaces, quotes, or other special characters.
+export AWARENESS_PROJECT_ROOT="$PROJECT_ROOT"
+export AWARENESS_OPT_IN_FILE="$PROJECT_ROOT/.claude/plugins/acknowledged-risks.json"
+export AWARENESS_STATE_FLAG="$PROJECT_ROOT/.claude/plugins/awareness-session-start-disabled"
 
-# Validate opt-in JSON has awareness session_start enabled
-ENABLED=$(python3 -c "
-import json, sys
+# Delegate everything to a single Python invocation:
+#   1. Check opt-in (reads AWARENESS_OPT_IN_FILE)
+#   2. Check opt-out flag (AWARENESS_STATE_FLAG)
+#   3. Generate bounded, redacted context snippet
+#   4. Emit JSON hook output
+#
+# Timeout is enforced inside Python via socket timeout + SIGALRM (Unix) or
+# subprocess timeout fallback. No external `timeout` command needed.
+exec python3 -c '
+import json, os, signal, sys, time
+from pathlib import Path
+
+PROJECT_ROOT = os.environ.get("AWARENESS_PROJECT_ROOT", "")
+OPT_IN_FILE = os.environ.get("AWARENESS_OPT_IN_FILE", "")
+STATE_FLAG = os.environ.get("AWARENESS_STATE_FLAG", "")
+
+# --- Opt-in check ---
+if not OPT_IN_FILE or not Path(OPT_IN_FILE).exists():
+    sys.exit(0)
+
 try:
-    with open('$OPT_IN_FILE', 'r') as f:
+    with open(OPT_IN_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-    plugins = data.get('plugins', {})
-    awareness = plugins.get('awareness-agent', {})
-    if awareness.get('session_start') is True:
-        sys.stdout.write('1')
-    else:
-        sys.stdout.write('0')
+    enabled = data.get("plugins", {}).get("awareness-agent", {}).get("session_start", False)
 except Exception:
-    sys.stdout.write('0')
-" 2>/dev/null) || exit 0
+    sys.exit(0)
 
-if [ "$ENABLED" != "1" ]; then
-  exit 0
-fi
+if not enabled:
+    sys.exit(0)
 
-# Check opt-out state file
-STATE_FILE="$PROJECT_ROOT/.claude/plugins/awareness-session-start-disabled"
-if [ -f "$STATE_FILE" ]; then
-  exit 0
-fi
+# --- Opt-out flag ---
+if STATE_FLAG and Path(STATE_FLAG).exists():
+    sys.exit(0)
 
-# Generate context with hard timeout (2s max so we never block Claude startup)
-# Use argv-style call — no shell injection
-CONTEXT=$(timeout 2s python3 -c "
-import sys
-sys.path.insert(0, '$PROJECT_ROOT/tools/awareness-agent')
-from awareness_agent.session_start import build_context_snippet
-import os
-print(build_context_snippet(cwd='$PROJECT_ROOT', max_chars=10000, timeout=1.5))
-" 2>/dev/null) || exit 0
+# --- Generate context with hard timeout ---
+# Use SIGALRM on Unix; on non-Unix, rely on socket-level timeouts.
+def _alarm_handler(signum, frame):
+    raise TimeoutError("awareness context generation timed out")
 
-# If empty, nothing to inject
-if [ -z "$CONTEXT" ]; then
-  exit 0
-fi
+old_handler = None
+try:
+    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(2)  # 2-second hard timeout, works on Linux/macOS
+except (AttributeError, OSError):
+    pass  # SIGALRM not available (Windows); socket timeout will catch it
 
-# Emit structured JSON per Claude Code SessionStart hook protocol
-python3 -c "
-import json
-context = sys.argv[1]
+try:
+    sys.path.insert(0, str(Path(PROJECT_ROOT) / "tools" / "awareness-agent"))
+    from awareness_agent.session_start import build_context_snippet
+
+    context = build_context_snippet(
+        cwd=PROJECT_ROOT,
+        max_chars=10000,
+        timeout=1.5,
+    )
+except Exception:
+    context = ""
+finally:
+    try:
+        signal.alarm(0)
+        if old_handler is not None:
+            signal.signal(signal.SIGALRM, old_handler)
+    except (AttributeError, OSError):
+        pass
+
+if not context:
+    sys.exit(0)
+
+# --- Emit JSON hook output ---
 output = json.dumps({
-    'hookSpecificOutput': {
-        'hookEventName': 'SessionStart',
-        'additionalContext': context,
+    "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": context,
     }
 })
 print(output)
-" "$CONTEXT"
-
-exit 0
+'
 """
 
 # Opt-in JSON template
@@ -192,7 +210,6 @@ def _write_json(path: Path, data: object, mode: int = 0o600) -> None:
 
 
 def _write_text(path: Path, content: str, mode: int = 0o644, executable: bool = False) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     secure_chmod(path, 0o755 if executable else mode)
@@ -334,28 +351,38 @@ def cmd_claude_uninstall(args: argparse.Namespace) -> int:
 
 
 def cmd_claude_doctor(args: argparse.Namespace) -> int:
-    """Diagnose integration state for a project."""
+    """Diagnose integration state for a project. Reports state + actionable fixes."""
     project_root = Path(args.project).resolve() if args.project else Path.cwd().resolve()
     import json as _json
 
     print(f"awareness claude doctor — {project_root}")
     print()
 
+    issues: list[str] = []
+    hints: list[str] = []
+
     # Daemon status
-    status: dict = {}
+    daemon_running = False
     try:
         result, daemon = _call("status", {"cwd": str(project_root)})
         status = dict(result)
-        status["daemon_running"] = daemon
+        daemon_running = daemon
     except Exception as exc:
-        status["error"] = str(exc)
-        status["daemon_running"] = False
+        status = {"error": str(exc)}
 
-    print(f"daemon running: {status.get('daemon_running', False)}")
+    print(f"daemon running: {daemon_running}")
     print(f"socket: {status.get('socket_path', 'n/a')}")
     print(f"db: {status.get('db_path', 'n/a')}")
     counts = status.get("counts", {})
     print(f"memories: {counts.get('decisions', 0)}")
+
+    if not daemon_running:
+        issues.append("daemon not running")
+        hints.append("run: awareness start")
+
+    if status.get("error"):
+        issues.append(f"status error: {status['error']}")
+
     print()
 
     # Integration files
@@ -363,36 +390,67 @@ def cmd_claude_doctor(args: argparse.Namespace) -> int:
     print(f".claude dir exists: {claude_dir.exists()}")
 
     cmd_path = _commands_dir(project_root) / "awareness.md"
-    print(f"  commands/awareness.md: {'EXISTS' if cmd_path.exists() else 'missing'}")
+    cmd_exists = cmd_path.exists()
+    print(f"  commands/awareness.md: {'EXISTS' if cmd_exists else 'missing'}")
+    if not cmd_exists and claude_dir.exists():
+        hints.append("run: awareness claude install")
 
     hook_path = _session_start_hook_path(project_root)
-    print(f"  hooks/awareness-session-start.sh: {'EXISTS' if hook_path.exists() else 'missing'}")
+    hook_exists = hook_path.exists()
+    print(f"  hooks/awareness-session-start.sh: {'EXISTS' if hook_exists else 'missing'}")
+    if not hook_exists and claude_dir.exists():
+        hints.append("run: awareness claude install  (to add the SessionStart hook)")
 
     opt_in = _opt_in_path(project_root)
     opt_in_enabled = False
+    opt_in_valid = False
     if opt_in.exists():
         try:
             data = _json.loads(opt_in.read_text(encoding="utf-8"))
+            opt_in_valid = True
             plugins = data.get("plugins", {})
             awareness = plugins.get("awareness-agent", {})
             opt_in_enabled = awareness.get("session_start", False)
         except Exception:
-            pass
+            issues.append("acknowledged-risks.json is not valid JSON")
+            hints.append("fix: delete .claude/plugins/acknowledged-risks.json and re-run install")
     print(f"  session_start enabled: {opt_in_enabled}")
+    if not opt_in_valid and opt_in.exists():
+        print(f"  opt-in file: INVALID JSON")
+    elif not opt_in.exists():
+        print(f"  opt-in file: missing (run awareness claude install)")
 
     flag = _opt_out_flag_path(project_root)
-    print(f"  opt-out flag present: {flag.exists()}")
+    flag_exists = flag.exists()
+    print(f"  opt-out flag present: {flag_exists}")
+    if flag_exists and opt_in_enabled:
+        issues.append("opt-out flag is present — injection is disabled despite opt-in")
+        hints.append("fix: awareness claude install --session-start  (removes flag)")
 
-    # SessionStart context test
+    if opt_in_enabled and not issues:
+        print()
+        print("SessionStart context preview:")
+        snippet = build_context_snippet(cwd=str(project_root), timeout=1.0)
+        if snippet:
+            print(snippet)
+        else:
+            print("  (daemon not running or no context available)")
+            hints.append("start the daemon to see context preview: awareness start")
+
+    # Summary
     print()
-    print("SessionStart context preview:")
-    snippet = build_context_snippet(cwd=str(project_root), timeout=1.0)
-    if snippet:
-        print(snippet)
-    else:
-        print("  (daemon not running or no context available)")
+    if issues:
+        print(f"issues ({len(issues)}):")
+        for issue in issues:
+            print(f"  - {issue}")
+    if hints:
+        print(f"suggested actions:")
+        for hint in hints:
+            print(f"  → {hint}")
+    if not issues and not hints:
+        print("all clear — integration looks healthy")
 
-    return 0
+    return 1 if issues else 0
 
 
 # ---------------------------------------------------------------------------
@@ -418,29 +476,25 @@ def cmd_claude_session_start(args: argparse.Namespace) -> int:
 
 
 def _call(method: str, params: dict | None = None):
-    """Re-use CLI.call without importing cli module directly."""
+    """Try daemon RPC first, fall back to direct call. Single socket connection."""
     from .protocol import handle_request
     from .paths import socket_path
+    import socket as _sock
+    import time as _time
+    import json as _json
+
     path = socket_path()
     if path.exists():
-        import socket as _sock
         try:
-            with _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM) as s:
-                s.settimeout(0.5)
-                s.connect(str(path))
-        except OSError:
-            pass
-        else:
-            import time as _time, json as _json
-            payload = {
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params or {},
-                "id": int(_time.time() * 1000),
-            }
             with _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM) as s:
                 s.settimeout(1.0)
                 s.connect(str(path))
+                payload = {
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params or {},
+                    "id": int(_time.time() * 1000),
+                }
                 s.sendall((_json.dumps(payload) + "\n").encode("utf-8"))
                 data = b""
                 while not data.endswith(b"\n"):
@@ -453,6 +507,8 @@ def _call(method: str, params: dict | None = None):
                 if resp.get("error"):
                     raise RuntimeError(resp["error"].get("message", "unknown error"))
                 return resp.get("result"), True
+        except (OSError, _json.JSONDecodeError, RuntimeError):
+            pass
     return handle_request(method, params or {}), False
 
 
