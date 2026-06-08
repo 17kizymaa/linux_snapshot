@@ -145,20 +145,80 @@ tools/awareness-agent/
     └── claude-code.md        # This file
 ```
 
-## Recommended Next Spike: C0 — Relevance/Ranking + Memory Taxonomy
+## Spike C0 Results: Relevance/Ranking + Memory Taxonomy
 
-Once B0.1 install → doctor → preview → uninstall is boringly reliable:
+**Status:** prototype complete (commit `39eca3e`)
 
-1. **Memory taxonomy**: Add `kind` (decision, fact, preference, task, etc.),
-   `scope` (global, project, repo, path), `source`, `confidence`, `tags`,
-   `expires_at`. Migrate schema safely.
+### What was built
 
-2. **Replace SQLite LIKE with FTS5**: Deterministic local BM25 ranking,
-   recency decay, project/scope boost, deduplication. Embeddings optional
-   behind a later flag.
+- `awareness_agent/ranking.py` — FTS5 virtual table, taxonomy migration, ranked recall
+- `tests/c0-eval.py` — 15 synthetic fixtures, 6 queries, 6/6 assertions pass
 
-3. **Evaluation fixture**: Seed known memories, run known recall queries,
-   assert expected top-k ordering.
+### Memory Taxonomy
 
-4. **Update SessionStart**: Use ranked recall to fit highest-value memories
-   into the existing context budget. Maintain all fail-closed behavior.
+| Kind | Source | Example | Retention | Auto-retrieve? |
+|------|--------|---------|-----------|-----------------|
+| `decision` | User explicit | "Use pytest for tests" | Permanent | Yes |
+| `preference` | User explicit | "Prefer functional style" | Permanent | Yes |
+| `fact` | User / auto | "Project uses FastAPI" | Permanent | Yes |
+| `procedure` | User / auto | "Deploy: build then push" | Permanent | Yes |
+| `error` | Auto (failures) | "sqlite locked → restart" | 90 days | Yes |
+| `note` | User / auto | "Consider migrating to APIRouter" | 30 days | Yes |
+| `task` | User explicit | "Add auth middleware" | Until done | Yes |
+| `pinned` | User explicit | "DO NOT run reset-db in prod" | Permanent | Yes (boosted) |
+
+| Scope | Meaning |
+|-------|---------|
+| `global` | Any session, any project |
+| `project` | Specific project path |
+| `repo` | Specific git repo |
+| `path` | Specific file/directory |
+| `session` | Single session only (ephemeral) |
+
+### Ranking Approach
+
+```
+score = w_fts * fts_bm25(query, text)
+      + w_recency * 2^(-age_days / half_life)
+      + w_project * (1 if project matches else 0)
+      + w_pinned * (1 if pinned else 0)
+      + w_error * (1 if kind=error else 0)
+      + w_source * (1 if source=user else 0)
+```
+
+Default weights (`RankWeights`):
+- `fts_bm25`: 1.0 (FTS5 rank, lower=better → inverted to 0-1)
+- `recency`: 0.3 (half-life: 30 days)
+- `project_match`: 0.4
+- `pinned_boost`: 0.5
+- `error_boost`: 0.2
+- `source_boost`: 0.1
+
+Each result includes `_score_breakdown` explaining the score components.
+
+### Prototype Location
+
+```
+tools/awareness-agent/
+├── awareness_agent/ranking.py     # FTS5 + taxonomy + ranking
+└── tests/c0-eval.py               # 15 fixtures, 6 queries, all pass
+```
+
+Run eval: `cd tools/awareness-agent && python3 tests/c0-eval.py --verbose`
+
+### Open Questions
+
+1. **Integration path**: `ranking.py` is standalone — needs wiring into `store.py` `recall()` and `session_start.py` `build_context_snippet()`. C1 should do this integration.
+2. **FTS5 tokenization**: Default tokenizer works for English code terms. May need trigram tokenizer for partial matches (e.g. "test" matching "pytest").
+3. **Taxonomy population**: Existing `category` values need migration to `kind`. Auto-mapping covers common cases but user may need to review.
+4. **Embeddings**: FTS5 BM25 is good enough for C0. Semantic similarity (embeddings) deferred to C2+.
+5. **Deduplication**: Not yet implemented. Near-identical memories should be deduped at recall time.
+
+### Recommended C1 Next Steps
+
+1. Wire `recall_ranked()` into `store.py` as the default `recall()` implementation
+2. Wire ranked results into `session_start.py` `build_context_snippet()`
+3. Add `kind` auto-detection in `remember()` based on category patterns
+4. Add trigram tokenizer to FTS5 for better partial matching
+5. Add deduplication pass in recall (near-identical decision text)
+6. Update A0/B0 smoke tests to cover ranked recall
