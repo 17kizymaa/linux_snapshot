@@ -90,6 +90,7 @@ func init() {
 	rootCmd.AddCommand(newDevicesCmd(getDeviceService))
 	rootCmd.AddCommand(newDetectCmd(getDeviceService))
 	rootCmd.AddCommand(newConnectCmd(getDeviceService))
+	rootCmd.AddCommand(newDisconnectCmd(getDeviceService))
 	rootCmd.AddCommand(newStatusCmd(getDeviceService))
 	rootCmd.AddCommand(setupCmd)
 }
