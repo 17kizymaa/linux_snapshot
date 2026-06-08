@@ -121,11 +121,11 @@ func (s *deviceService) Info(ctx context.Context, serial string) (*proto.DeviceI
 	// Run getprop for each property
 	model, err := scopedRunner.Run(ctx, "shell", "getprop", "ro.product.model")
 	if err != nil {
-		s.logger.Warn().Err(err).Msg("failed to get ro.product.model")
-		info.Model = "unknown"
-	} else {
-		info.Model = deflateProp(model)
+		s.logger.Error().Err(err).Msg("failed to get ro.product.model")
+		return nil, errors.NewError(errors.ADBServerError,
+			"Failed to query device properties. Run: firetv status", err)
 	}
+	info.Model = deflateProp(model)
 
 	sdk, err := scopedRunner.Run(ctx, "shell", "getprop", "ro.build.version.sdk")
 	if err != nil {

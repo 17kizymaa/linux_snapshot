@@ -65,8 +65,12 @@ func (r *ADBRunner) Run(ctx context.Context, args ...string) (string, error) {
 			errType = errors.DeviceOfflineError
 		} else if strings.Contains(output, "device not found") {
 			errType = errors.NotFoundError
+		} else if strings.Contains(output, "no devices/emulators found") {
+			errType = errors.NotFoundError
 		} else if strings.Contains(output, "unauthorized") {
 			errType = errors.AuthError
+		} else if strings.Contains(output, "could not install *smartsocket") || strings.Contains(output, "Address already in use") {
+			errType = errors.ADBServerError
 		} else if strings.Contains(output, "Connection refused") || strings.Contains(output, "No route to host") {
 			errType = errors.ConnectionError
 		}
