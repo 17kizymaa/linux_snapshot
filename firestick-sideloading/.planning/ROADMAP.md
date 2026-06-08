@@ -6,7 +6,7 @@ A Go CLI tool (`firetv`) that automates the complete Fire TV Stick + Arch Linux 
 
 ## Phases
 
-- [ ] **Phase 1: Core Connect + Device Awareness** — Detect Fire TV devices, connect via network ADB, display device info, Arch setup helpers
+- [x] **Phase 1: Core Connect + Device Awareness** — Detect Fire TV devices, connect via network ADB, display device info, Arch setup helpers (completed 2026-06-08)
 - [ ] **Phase 2: Sideloading & App Management** — Install/uninstall APKs, split APK support, package listing
 - [ ] **Phase 3: Control & Mirroring** — scrcpy integration, UHID/SDK fallback, ADB keyevent control
 - [ ] **Phase 4: Safety, Automation & Polish** — Snapshots/rollback, systemd generation, Viper config, rich logging
@@ -28,16 +28,16 @@ A Go CLI tool (`firetv`) that automates the complete Fire TV Stick + Arch Linux 
   5. CLI enforces single ADB server on 127.0.0.1:5037 and rejects 0.0.0.0 binding
   6. CLI detects "unauthorized" and "offline" states and prompts user to fix them
 
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Project scaffold, ADB runner, config, errors, stub commands (Wave 1)
+- [x] 01-01-PLAN.md — Project scaffold, ADB runner, config, errors, stub commands (Wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — DeviceService: detect, connect, info, health check, disconnect (Wave 2)
-- [ ] 01-03-PLAN.md — Arch setup automation (OSUtils), error classification hardening (Wave 2)
+- [x] 01-02-PLAN.md — DeviceService: detect, connect, info, health check, disconnect (Wave 2)
+- [x] 01-03-PLAN.md — Arch setup automation (OSUtils), error classification hardening (Wave 2)
 
 ### Phase 2: Sideloading & App Management
 
@@ -111,7 +111,7 @@ Phases execute in order: 1 -> 2 -> 3 -> 4 (Phase 3 can start after Phase 1, para
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Connect + Device Awareness | 0/3 | Not started | - |
+| 1. Core Connect + Device Awareness | 3/3 | Complete   | 2026-06-08 |
 | 2. Sideloading & App Management | 0/2 | Not started | - |
 | 3. Control & Mirroring | 0/2 | Not started | - |
 | 4. Safety, Automation & Polish | 0/2 | Not started | - |
