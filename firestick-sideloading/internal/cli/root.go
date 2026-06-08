@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"context"
+	"fmt"
 	"os"
 
 	"github.com/anphuni/firestick-sideloading/internal/config"
+	"github.com/anphuni/firestick-sideloading/internal/device"
 	"github.com/anphuni/firestick-sideloading/internal/runtime"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -16,6 +19,9 @@ var (
 	verboseFlag bool
 	jsonFlag    bool
 )
+
+// deviceServiceGetter retrieves the DeviceService from the command context.
+type deviceServiceGetter func(cmd *cobra.Command) (device.DeviceService, error)
 
 // Execute runs the root command.
 func Execute() error {
@@ -54,8 +60,24 @@ Detect devices, connect via network ADB, sideload APKs, mirror with scrcpy, and 
 			return err
 		}
 
+		// Inject DeviceService into command context
+		svc := device.NewDeviceService(runner, log.Logger)
+		cmd.SetContext(context.WithValue(cmd.Context(), deviceServiceKey{}, svc))
+
 		return nil
 	},
+}
+
+// deviceServiceKey is the context key for DeviceService.
+type deviceServiceKey struct{}
+
+// getDeviceService retrieves the DeviceService from the command context.
+func getDeviceService(cmd *cobra.Command) (device.DeviceService, error) {
+	val := cmd.Context().Value(deviceServiceKey{})
+	if val == nil {
+		return nil, fmt.Errorf("device service not initialized")
+	}
+	return val.(device.DeviceService), nil
 }
 
 func init() {
@@ -65,9 +87,9 @@ func init() {
 
 	viper.BindPFlag("device.default", rootCmd.PersistentFlags().Lookup("device"))
 
-	rootCmd.AddCommand(devicesCmd)
-	rootCmd.AddCommand(detectCmd)
-	rootCmd.AddCommand(connectCmd)
-	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(newDevicesCmd(getDeviceService))
+	rootCmd.AddCommand(newDetectCmd(getDeviceService))
+	rootCmd.AddCommand(newConnectCmd(getDeviceService))
+	rootCmd.AddCommand(newStatusCmd(getDeviceService))
 	rootCmd.AddCommand(setupCmd)
 }
