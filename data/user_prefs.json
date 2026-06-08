@@ -1,0 +1,18 @@
+{
+  "_users": {
+    "anphuni": {
+      "theme": {
+        "name": "custom",
+        "colors": {
+          "bg": "#f3f1f1",
+          "fg": "#2b2122",
+          "panel": "#fafafa",
+          "border": "#cab5b6",
+          "red": "#e06c75"
+        },
+        "bgPattern": "constellations",
+        "bgEffectColor": "#e94560"
+      }
+    }
+  }
+}

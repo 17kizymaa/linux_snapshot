@@ -1,0 +1,87 @@
+# === Security: never commit ===
+.ssh/
+.gnupg/
+.private-keys-v1.d/
+id_rsa
+id_rsa.pub
+*.pem
+*.key
+
+# === Shell history & auth ===
+.bash_history
+.zsh_history
+.Xauthority
+.ICEauthority
+.dmrc
+
+# === Cache & temp ===
+.cache/
+.local/
+.npm/
+.ollama/
+.pytest_cache/
+.trial_logs/
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+venv/
+.venv/
+
+# === Large/binary downloads ===
+Downloads/
+*.m4a
+*.mp3
+*.mp4
+*.zip
+*.tar.gz
+*.tar.xz
+*.deb
+*.rpm
+*.iso
+*.img
+
+# === Desktop (usually shortcuts/junk) ===
+Desktop/
+
+# === Symlinks to system libs ===
+libwebp.so.*
+
+# === Editor/IDE junk ===
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# === OS noise ===
+.xsession-errors
+.xsession-errors.old
+.thumbnails/
+thumbnails/
+
+# === Claude Code internal ===
+.claude.json
+.claude/
+
+# === Browser data (huge, no value in snapshot) ===
+.agent-chrome/
+.config/chromium/
+
+# === GSD planning (personal notes) ===
+.planning/
+
+# === Large recovery/model data (use git-lfs or skip) ===
+archive/recovery/
+data/fastembed_cache/
+
+# === Misc dev tooling state ===
+.chroma_db/
+.gemini/
+.fcc/
+.antigravity-test/
+.benchmarks/
+nltk_data/
+licenses/
+odysseus-ui.service
+server_ops/

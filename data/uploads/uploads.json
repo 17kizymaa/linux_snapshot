@@ -1,0 +1,28 @@
+{
+  "anphuni:3e13e656f77b89f244190163b8535d9197899c00efbf5765979d2fa860b90e05": {
+    "id": "afe41eb372db466890ba63de1d00051f.md",
+    "path": "/home/anphuni/odysseus/data/uploads/2026/06/03/afe41eb372db466890ba63de1d00051f.md",
+    "mime": "text/markdown",
+    "size": 18411,
+    "name": "SPRINT_OPERATIONS.md",
+    "hash": "3e13e656f77b89f244190163b8535d9197899c00efbf5765979d2fa860b90e05",
+    "original_name": "SPRINT_OPERATIONS.md",
+    "uploaded_at": "2026-06-03T12:26:15.165790",
+    "last_accessed": "2026-06-03T12:26:15.165801",
+    "client_ip": "127.0.0.1",
+    "owner": "anphuni"
+  },
+  "anphuni:d07a958c40215821d0f1334e29927c8d7f5d6f28c0280fbe60abe07576eb220f": {
+    "id": "acfb498887364f6cab0f3ffb1de93a84.md",
+    "path": "/home/anphuni/odysseus/data/uploads/2026/06/03/acfb498887364f6cab0f3ffb1de93a84.md",
+    "mime": "text/markdown",
+    "size": 37906,
+    "name": "SPRINT_ORCHESTRATION.md",
+    "hash": "d07a958c40215821d0f1334e29927c8d7f5d6f28c0280fbe60abe07576eb220f",
+    "original_name": "SPRINT_ORCHESTRATION.md",
+    "uploaded_at": "2026-06-03T12:26:15.168829",
+    "last_accessed": "2026-06-03T12:26:15.168839",
+    "client_ip": "127.0.0.1",
+    "owner": "anphuni"
+  }
+}

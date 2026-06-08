@@ -1,0 +1,6 @@
+[submodule "aetherOS"]
+	path = aetherOS
+	url = https://github.com/17kizymaa/aetherOS.git
+[submodule "odysseus"]
+	path = odysseus
+	url = https://github.com/pewdiepie-archdaemon/odysseus.git
