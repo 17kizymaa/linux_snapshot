@@ -19,6 +19,25 @@ from .ranking import (
 )
 from .redaction import redact_text
 
+# Global config: embeddings enabled flag (default off to keep baseline green)
+_EMBEDDINGS_ENABLED = False
+
+
+def set_embeddings_enabled(enabled: bool) -> None:
+    """Enable or disable embedding computation at remember() time.
+
+    When enabled, embeddings are computed for every remembered text and
+    stored in the embedding BLOB column. When disabled (default), no
+    embedding is computed or stored — pure C1 FTS5 behavior.
+    """
+    global _EMBEDDINGS_ENABLED
+    _EMBEDDINGS_ENABLED = bool(enabled)
+
+
+def embeddings_enabled() -> bool:
+    """Return whether embeddings are currently enabled."""
+    return _EMBEDDINGS_ENABLED
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY,
@@ -182,24 +201,54 @@ class AwarenessStore:
             known_project_paths=known_paths,
         )
 
+        # Compute embedding if enabled
+        embedding: bytes | None = None
+        if _EMBEDDINGS_ENABLED:
+            try:
+                from .embeddings import embed_text
+                embedding_text = f"{decision} {redact_text(rationale)} {redact_text(context)}".strip()
+                embedding = embed_text(embedding_text)
+            except Exception:
+                embedding = None  # fail-closed: no embedding, no error
+
         with self.conn:
-            cur = self.conn.execute(
-                """
-                INSERT INTO decisions(project_id, category, context, decision, rationale, source, kind, expires_at, scope)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    project_id,
-                    parsed_category,
-                    redact_text(context),
-                    decision,
-                    redact_text(rationale),
-                    redact_text(source) or "user",
-                    kind,
-                    expires_at,
-                    scope,
-                ),
-            )
+            if embedding is not None:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO decisions(project_id, category, context, decision, rationale, source, kind, expires_at, scope, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        parsed_category,
+                        redact_text(context),
+                        decision,
+                        redact_text(rationale),
+                        redact_text(source) or "user",
+                        kind,
+                        expires_at,
+                        scope,
+                        embedding,
+                    ),
+                )
+            else:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO decisions(project_id, category, context, decision, rationale, source, kind, expires_at, scope)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        parsed_category,
+                        redact_text(context),
+                        decision,
+                        redact_text(rationale),
+                        redact_text(source) or "user",
+                        kind,
+                        expires_at,
+                        scope,
+                    ),
+                )
         self._secure_files()
         return int(cur.lastrowid)
 
@@ -211,19 +260,33 @@ class AwarenessStore:
         project_path: str | None | type(...) = ...,
         weights: RankWeights | None = None,
     ) -> list[dict[str, Any]]:
-        """Ranked recall using FTS5 + heuristic scoring.
+        """Ranked recall using FTS5 + heuristic scoring (+ optional embeddings).
 
         Falls back to recency + metadata scoring when query is empty.
         Results include '_score' and '_score_breakdown' when ranked.
+
+        If embeddings are enabled (set_embeddings_enabled(True)), a query
+        embedding is computed and passed to recall_ranked for hybrid scoring.
         """
         if project_path is ...:
             project_path = self._current_project_path()
+
+        # Compute query embedding if enabled and query is non-empty
+        query_embedding: bytes | None = None
+        if _EMBEDDINGS_ENABLED and query.strip():
+            try:
+                from .embeddings import embed_text
+                query_embedding = embed_text(query)
+            except Exception:
+                query_embedding = None  # fail-closed
+
         return recall_ranked(
             self.conn,
             query,
             project_path=project_path,
             limit=limit,
             weights=weights,
+            query_embedding=query_embedding,
         )
 
     def sweep(self) -> int:

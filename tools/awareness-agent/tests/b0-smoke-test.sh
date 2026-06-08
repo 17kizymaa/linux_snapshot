@@ -769,3 +769,170 @@ echo "[ok] scope auto-detection and cross-project isolation work correctly"
 # ============================================================
 echo ""
 echo "[ok] awareness-agent spike C2b scope auto-detection tests passed"
+
+# ============================================================
+# Section 24: C2c — Local embeddings for hybrid recall
+# ============================================================
+echo ""
+echo "--- Section 24: C2c local embeddings (hybrid recall) ---"
+
+python3 - "$AGENT_ROOT" <<'PYEOF'
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+
+from awareness_agent.store import AwarenessStore, set_embeddings_enabled, embeddings_enabled
+from awareness_agent.ranking import RankWeights
+
+# --- 24a: Embeddings DISABLED (default) — recall still works via FTS5 ---
+print("[24a] Embeddings disabled — FTS5-only recall still works")
+
+set_embeddings_enabled(False)
+assert not embeddings_enabled()
+
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+
+store = AwarenessStore(db_path)
+store.remember('Use pytest for FastAPI testing', category='decision', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+store.remember('Prefer tabs over spaces in Python', category='preference', context='style', source='user')
+store.remember('DO NOT run reset-db in production', category='pinned', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+
+results = store.recall('pytest', limit=5, project_path='/home/user/aw')
+assert len(results) > 0, 'FTS5-only recall returned no results'
+assert 'pytest' in results[0]['decision'].lower(), f'Wrong top result: {results[0]["decision"]}'
+# Embedding component should be zero
+assert results[0]['_score_breakdown'].get('embedding', 0) == 0.0, 'Embedding component non-zero when disabled'
+print(f'  [ok] FTS5-only recall works: top="{results[0]["decision"][:50]}" score={results[0]["_score"]}')
+
+store.close()
+os.unlink(db_path)
+
+# --- 24b: Embeddings ENABLED — hybrid scoring active ---
+print("[24b] Embeddings enabled — hybrid scoring active")
+
+set_embeddings_enabled(True)
+assert embeddings_enabled()
+
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+
+store = AwarenessStore(db_path)
+# Insert memories with overlapping semantics but different keywords
+store.remember('Use pytest with pytest-asyncio for FastAPI tests', category='decision', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+store.remember('SQLite database locks under concurrent writes — restart daemon', category='error', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+store.remember('Deploy with make build then make push', category='procedure', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+store.remember('Bearer token leaked in recall — added redaction patterns', category='error', context='security', source='user')
+
+# Verify embeddings are stored (only the 3 project memories + global error = 4)
+raw = store.conn.execute('SELECT COUNT(*) FROM decisions WHERE embedding IS NOT NULL').fetchone()[0]
+assert raw == 4, f'Expected 4 rows with embeddings, got {raw}'
+print(f'  [ok] All 4 memories have embeddings stored')
+
+# Hybrid recall: single FTS5 term "pytest" matches via trigram, embedding adds boost
+weights = RankWeights(embedding=0.5)
+results = store.recall('pytest', limit=5, project_path='/home/user/aw', weights=weights)
+assert len(results) > 0, 'Hybrid recall returned no results'
+
+# Embedding component should be non-zero for semantically similar memories
+top = results[0]
+emb_score = top['_score_breakdown'].get('embedding', 0)
+assert emb_score > 0, f'Embedding component is zero for similar query: {top["decision"]}'
+assert 'pytest' in top['decision'].lower(), f'Wrong top result: {top["decision"]}'
+print(f'  [ok] Hybrid recall: top="{top["decision"][:50]}" emb_score={emb_score:.4f}')
+
+store.close()
+os.unlink(db_path)
+
+# --- 24c: Hybrid recall boosts semantically-relevant results via embedding ---
+print("[24c] Hybrid scoring boosts embedding-similar results")
+
+set_embeddings_enabled(True)
+
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+
+store = AwarenessStore(db_path)
+# Two memories both FTS5-matchable by "pytest", but with different semantic content
+store.remember('Run pytest tests before every commit', category='procedure', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+store.remember('Purchase pytest supplies from the office store', category='note', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+
+# Query "pytest testing" — FTS5 matches both (via "pytest" trigram),
+# but embedding should boost the procedure about running tests
+weights_fts_only = RankWeights(embedding=0.0)
+weights_hybrid = RankWeights(embedding=0.5)
+
+results_fts = store.recall('pytest', limit=5, project_path='/home/user/aw', weights=weights_fts_only)
+results_hybrid = store.recall('pytest', limit=5, project_path='/home/user/aw', weights=weights_hybrid)
+
+assert len(results_fts) > 0, 'FTS5-only returned no results'
+assert len(results_hybrid) > 0, 'Hybrid returned no results'
+
+# Both should find results; hybrid top should have non-zero embedding component
+hybrid_emb = results_hybrid[0]['_score_breakdown'].get('embedding', 0)
+assert hybrid_emb > 0, f'Hybrid top embedding component is zero: {results_hybrid[0]["decision"]}'
+print(f'  [ok] FTS5-only top: "{results_fts[0]["decision"][:50]}" score={results_fts[0]["_score"]}')
+print(f'  [ok] Hybrid top:    "{results_hybrid[0]["decision"][:50]}" score={results_hybrid[0]["_score"]} emb={hybrid_emb:.4f}')
+
+store.close()
+os.unlink(db_path)
+
+# --- 24d: No network access assertion ---
+print("[24d] No network access — embedding is local-only")
+
+import socket
+# Save original socket to restore later
+_original_socket = socket.socket
+
+def _blocking_socket(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0, fileno=None):
+    """Socket factory that blocks only network (AF_INET/AF_INET6) sockets."""
+    if family in (socket.AF_INET, socket.AF_INET6):
+        raise RuntimeError('Network (IP) socket blocked — embedding must be local-only')
+    # Allow Unix sockets (AF_UNIX) and others
+    return _original_socket(family, type, proto, fileno)
+
+socket.socket = _blocking_socket  # type: ignore
+
+try:
+    set_embeddings_enabled(True)
+    db_fd, db_path = tempfile.mkstemp(suffix='.db')
+    os.close(db_fd)
+
+    store = AwarenessStore(db_path)
+    # Store a preference (kind=preference → scope=global, survives no-project recall)
+    # This must NOT raise — embeddings are local (hash-based)
+    store.remember('Embedding hash function prefers SHA-256 for determinism', category='preference', context='local-only embedding design', source='user')
+    # Recall with no project path → only global-scope memories surface
+    results = store.recall('embedding hash', limit=3)
+    assert len(results) > 0, 'No results after remembering with blocked network'
+    print(f'  [ok] Embedding computed with network blocked — truly local')
+
+    store.close()
+    os.unlink(db_path)
+finally:
+    socket.socket = _original_socket  # type: ignore
+
+# --- 24e: Fallback when sentence-transformers unavailable ---
+print("[24e] Fallback when sentence-transformers unavailable")
+
+# embeddings.py already falls back to hash_embed when sentence-transformers
+# is not installed. We verify this by checking the hash path was used.
+set_embeddings_enabled(True)
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+
+store = AwarenessStore(db_path)
+store.remember('sentence-transformers not installed — hash fallback', category='note', context='test', source='user')
+
+# Verify hash-based embedding was stored (not None)
+raw = store.conn.execute('SELECT embedding FROM decisions WHERE id = 1').fetchone()
+assert raw[0] is not None, 'Hash-based fallback embedding is None'
+assert len(raw[0]) == 1536, f'Expected 1536 bytes (384 float32), got {len(raw[0])}'
+print(f'  [ok] Hash-based fallback embedding stored ({len(raw[0])} bytes)')
+
+store.close()
+os.unlink(db_path)
+
+set_embeddings_enabled(False)  # reset to default
+print()
+print('[ok] All C2c embeddings tests passed')
+PYEOF

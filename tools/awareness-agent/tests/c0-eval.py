@@ -429,6 +429,124 @@ def run_store_integration() -> bool:
         os.unlink(db_path)
 
 
+def run_embedding_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
+    """Evaluate C2c: local embeddings for hybrid recall."""
+    print("\n=== C2c: Embedding hybrid recall ===")
+    failures: list[str] = []
+    passes: list[str] = []
+
+    # Import embedding module
+    from awareness_agent.embeddings import embed_text, cosine_similarity, hash_embed
+
+    # Q9: Embedding column exists and is populated for new memories
+    # Re-seed with embeddings by inserting directly with embedding BLOBs
+    # (The eval DB was created before store remembered, so we add embeddings manually)
+    rows = conn.execute("SELECT id, decision, rationale, context FROM decisions").fetchall()
+    for row in rows:
+        text = f"{row['decision']} {row['rationale']} {row['context']}".strip()
+        emb = hash_embed(text)
+        conn.execute("UPDATE decisions SET embedding = ? WHERE id = ?", (emb, row["id"]))
+    conn.commit()
+
+    # Verify all rows now have embeddings
+    null_count = conn.execute(
+        "SELECT COUNT(*) FROM decisions WHERE embedding IS NULL"
+    ).fetchone()[0]
+    if null_count > 0:
+        failures.append(f"Q9: {null_count} rows have NULL embedding after backfill")
+    else:
+        passes.append("Q9: embedding backfill")
+        if verbose:
+            print("  Q9: all rows have embeddings ✓")
+
+    # Q10: Hybrid scoring adds embedding component when enabled
+    # Query for "pytest" — both FTS5 and hybrid find pytest decision (#1)
+    weights_fts = RankWeights(embedding=0.0)
+    weights_hybrid = RankWeights(embedding=0.5)
+
+    # Hybrid recall needs a query embedding (normally computed by store.recall())
+    query_q10 = embed_text("pytest")
+
+    results_fts = recall_ranked(
+        conn, "pytest", project_path="/home/user/aw-webapp",
+        limit=5, weights=weights_fts,
+    )
+    results_hybrid = recall_ranked(
+        conn, "pytest", project_path="/home/user/aw-webapp",
+        limit=5, weights=weights_hybrid, query_embedding=query_q10,
+    )
+
+    if results_fts and results_hybrid:
+        fts_top = results_fts[0]["decision"]
+        hybrid_top = results_hybrid[0]["decision"]
+
+        if "pytest" not in fts_top.lower():
+            failures.append(f"Q10: FTS5 top missing 'pytest': {fts_top[:60]}")
+        elif "pytest" not in hybrid_top.lower():
+            failures.append(f"Q10: Hybrid top missing 'pytest': {hybrid_top[:60]}")
+        else:
+            # Hybrid should have a non-zero embedding component for this query
+            emb_score = results_hybrid[0]["_score_breakdown"].get("embedding", 0)
+            if emb_score <= 0:
+                failures.append(f"Q10: Hybrid embedding component is zero for matching query")
+            else:
+                passes.append("Q10: hybrid ranking")
+                if verbose:
+                    print(f"  Q10: FTS5 top='{fts_top[:50]}' score={results_fts[0]['_score']}")
+                    print(f"  Q10: Hybrid top='{hybrid_top[:50]}' score={results_hybrid[0]['_score']}")
+                    print(f"  Q10: Hybrid embedding component: {emb_score:.4f}")
+    else:
+        failures.append(f"Q10: no results (fts={len(results_fts)}, hybrid={len(results_hybrid)})")
+
+    # Q11: Embedding similarity is meaningful
+    # "pytest testing" should be more similar to the pytest decision than to the deploy procedure
+    query_emb = embed_text("pytest testing framework")
+    pytest_decision = conn.execute(
+        "SELECT embedding FROM decisions WHERE id = 1"
+    ).fetchone()["embedding"]
+    deploy_decision = conn.execute(
+        "SELECT embedding FROM decisions WHERE id = 4"
+    ).fetchone()["embedding"]
+
+    if pytest_decision and deploy_decision:
+        sim_pytest = cosine_similarity(query_emb, pytest_decision)
+        sim_deploy = cosine_similarity(query_emb, deploy_decision)
+        if sim_pytest > sim_deploy:
+            passes.append("Q11: semantic similarity ordering")
+            if verbose:
+                print(f"  Q11: sim(pytest query, pytest decision)={sim_pytest:.4f}")
+                print(f"  Q11: sim(pytest query, deploy decision)={sim_deploy:.4f}")
+        else:
+            failures.append(
+                f"Q11: semantic ordering wrong: pytest_sim={sim_pytest:.4f} <= deploy_sim={sim_deploy:.4f}"
+            )
+    else:
+        failures.append("Q11: missing embeddings for similarity test")
+
+    # Q12: Fallback when embeddings disabled (embedding_weight=0)
+    # Results should be identical to C1 behavior
+    weights_no_emb = RankWeights(embedding=0.0)
+    results_no_emb = recall_ranked(
+        conn, "deploy", project_path="/home/user/aw-webapp",
+        limit=3, weights=weights_no_emb,
+    )
+    if results_no_emb and results_no_emb[0]["_score_breakdown"].get("embedding", 0) == 0.0:
+        passes.append("Q12: embedding disabled fallback")
+        if verbose:
+            print(f"  Q12: embedding=0.0 when disabled, top='{results_no_emb[0]['decision'][:50]}'")
+    else:
+        failures.append("Q12: embedding component non-zero when disabled")
+
+    total = len(passes) + len(failures)
+    print(f"\nC2c Embedding Eval: {len(passes)}/{total} passed")
+    if failures:
+        for f in failures:
+            print(f"  ✗ {f}")
+        return False
+    print("  All embedding assertions passed ✓")
+    return True
+
+
 def main():
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
 
@@ -443,6 +561,9 @@ def main():
 
     if all_pass:
         all_pass = run_store_integration()
+
+    if all_pass:
+        all_pass = run_embedding_eval(conn, verbose=verbose)
 
     sys.exit(0 if all_pass else 1)
 

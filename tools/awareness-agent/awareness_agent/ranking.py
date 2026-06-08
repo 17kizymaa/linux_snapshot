@@ -76,6 +76,10 @@ class RankWeights:
     # Decay: half-life in days. 0 = no decay.
     recency_half_life_days: float = 30.0
 
+    # Embedding hybrid scoring (C2c)
+    embedding: float = 0.0        # Weight for cosine similarity (0 = embeddings disabled)
+    embedding_threshold: float = 0.3  # Minimum cosine sim to include embedding boost
+
 
 # ---------------------------------------------------------------------------
 # Per-kind TTL config
@@ -231,11 +235,16 @@ def rank_memories(
     *,
     current_project_path: str | None = None,
     weights: RankWeights | None = None,
+    query_embedding: bytes | None = None,
 ) -> list[dict[str, Any]]:
     """Rank a list of memory rows with score breakdown.
 
     Each row gets a '_score' and '_score_breakdown' added.
     Rows are sorted by _score descending.
+
+    If query_embedding is provided and weights.embedding > 0, cosine similarity
+    is computed against each row's stored embedding and added as an embedding
+    boost component.
     """
     if weights is None:
         weights = RankWeights()
@@ -289,6 +298,25 @@ def rank_memories(
             breakdown["source"] = weights.source_boost
         else:
             breakdown["source"] = 0.0
+
+        # 7) Embedding cosine similarity (C2c)
+        if (
+            query_embedding is not None
+            and weights.embedding > 0
+            and "embedding" in row
+            and row["embedding"] is not None
+        ):
+            try:
+                from .embeddings import cosine_similarity
+                sim = cosine_similarity(query_embedding, row["embedding"])
+                if sim >= weights.embedding_threshold:
+                    breakdown["embedding"] = weights.embedding * sim
+                else:
+                    breakdown["embedding"] = 0.0
+            except Exception:
+                breakdown["embedding"] = 0.0
+        else:
+            breakdown["embedding"] = 0.0
 
         total = sum(breakdown.values())
         scored.append({**row, "_score": round(total, 4), "_score_breakdown": breakdown})
@@ -349,6 +377,15 @@ CREATE INDEX IF NOT EXISTS idx_decisions_pinned ON decisions(pinned);
 CREATE INDEX IF NOT EXISTS idx_decisions_expires ON decisions(expires_at);
 """
 
+# Schema addition for embeddings (C2c)
+EMBEDDING_SCHEMA = """
+ALTER TABLE decisions ADD COLUMN embedding BLOB;
+"""
+
+EMBEDDING_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_decisions_embedding ON decisions(embedding);
+"""
+
 
 def migrate_taxonomy(conn: sqlite3.Connection) -> None:
     """Add taxonomy columns to decisions table if they don't exist."""
@@ -365,8 +402,11 @@ def migrate_taxonomy(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE decisions ADD COLUMN expires_at TEXT")
     if "pinned" not in existing:
         conn.execute("ALTER TABLE decisions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+    if "embedding" not in existing:
+        conn.execute("ALTER TABLE decisions ADD COLUMN embedding BLOB")
     # Create indexes
     conn.executescript(TAXONOMY_INDEXES)
+    conn.executescript(EMBEDDING_INDEX)
 
 
 def migrate_fts5(conn: sqlite3.Connection) -> None:
@@ -448,10 +488,13 @@ def recall_ranked(
     limit: int = 10,
     weights: RankWeights | None = None,
     include_expired: bool = False,
+    query_embedding: bytes | None = None,
 ) -> list[dict[str, Any]]:
-    """Ranked recall using FTS5 + heuristic scoring.
+    """Ranked recall using FTS5 + heuristic scoring (+ optional embeddings).
 
     If query is empty, falls back to recency + metadata scoring (no FTS).
+    If query_embedding is provided and weights.embedding > 0, cosine similarity
+    is blended into the score (hybrid recall).
     """
     if weights is None:
         weights = RankWeights()
@@ -473,6 +516,8 @@ def recall_ranked(
         scope_filter = "(d.scope IS NULL OR d.scope = 'global' OR d.scope != 'project')"
         scope_params = ()
 
+    embedding_select = ", d.embedding AS embedding"
+
     if query.strip():
         fts_query = _escape_fts5_query(query)
         if not fts_query:
@@ -484,7 +529,7 @@ def recall_ranked(
                    d.rationale, d.source, d.kind, d.scope, d.confidence,
                    d.tags, d.expires_at, d.pinned,
                    p.name AS project_name, p.path AS project_path,
-                   fts.rank AS _fts_rank
+                   fts.rank AS _fts_rank{embedding_select}
             FROM decisions_fts fts
             JOIN decisions d ON d.id = fts.rowid
             LEFT JOIN projects p ON p.id = d.project_id
@@ -502,13 +547,15 @@ def recall_ranked(
         else:
             expire_filter = "1=1"
 
+        # Embedding-only recall: if we have a query_embedding but no text query,
+        # fetch all non-expired rows (with embeddings) for brute-force scoring
         rows = conn.execute(
             f"""
             SELECT d.id, d.timestamp, d.category, d.context, d.decision,
                    d.rationale, d.source, d.kind, d.scope, d.confidence,
                    d.tags, d.expires_at, d.pinned,
                    p.name AS project_name, p.path AS project_path,
-                   NULL AS _fts_rank
+                   NULL AS _fts_rank{embedding_select}
             FROM decisions d
             LEFT JOIN projects p ON p.id = d.project_id
             WHERE {expire_filter}
@@ -530,11 +577,12 @@ def recall_ranked(
     # Convert to dicts
     result = [dict(r) for r in rows]
 
-    # Apply ranking
+    # Apply ranking (with optional embedding scoring)
     ranked = rank_memories(
         result,
         current_project_path=project_path,
         weights=weights,
+        query_embedding=query_embedding,
     )
 
     # Deduplicate near-identical decisions
