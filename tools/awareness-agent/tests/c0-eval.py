@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone, timedelta
@@ -30,6 +31,7 @@ from awareness_agent.ranking import (
     recall_ranked,
     rank_memories,
 )
+from awareness_agent.store import AwarenessStore
 
 
 def _now(days_ago: float = 0) -> str:
@@ -326,6 +328,46 @@ def run_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
     return True
 
 
+def run_store_integration() -> bool:
+    """Verify that AwarenessStore.recall() uses ranked recall (C1 integration)."""
+    print("\n=== C1: Store integration ===")
+
+    # Use a temp file DB so AwarenessStore can manage it
+    import tempfile
+    db_fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(db_fd)
+
+    store = AwarenessStore(db_path)
+    try:
+        store.remember("Use pytest for FastAPI tests", category="decision", context="cwd=/home/user/aw-webapp", source="user", project={"root": "/home/user/aw-webapp", "name": "aw-webapp"})
+        store.remember("Prefer functional style", category="preference", context="cwd=/home/user/aw-webapp", source="user", project={"root": "/home/user/aw-webapp", "name": "aw-webapp"})
+        store.remember("DO NOT run reset-db in prod", category="pinned", context="cwd=/home/user/aw-webapp", source="user", project={"root": "/home/user/aw-webapp", "name": "aw-webapp"})
+
+        # Verify kind auto-detection
+        status = store.status()
+        print(f"  Status: {status['counts']}")
+
+        # Verify ranked recall via store.recall()
+        results = store.recall("pytest", limit=3, project_path="/home/user/aw-webapp")
+        if not results or "_score" not in results[0]:
+            print("  [fail] store.recall() did not return ranked results")
+            return False
+        print(f"  Ranked recall top: {results[0]['decision'][:60]} (score={results[0]['_score']})")
+
+        # Verify kind column was populated
+        raw = store.conn.execute("SELECT kind FROM decisions WHERE id = 1").fetchone()
+        if raw[0] != "decision":
+            print(f"  [fail] kind auto-detection: expected 'decision', got '{raw[0]}'")
+            return False
+        print(f"  Kind auto-detection: '{raw[0]}' ✓")
+
+        print("  Store integration: all checks passed ✓")
+        return True
+    finally:
+        store.close()
+        os.unlink(db_path)
+
+
 def main():
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
 
@@ -337,6 +379,9 @@ def main():
     print(f"  Fixtures: 15 memories across 2 projects + global")
 
     all_pass = run_eval(conn, verbose=verbose)
+
+    if all_pass:
+        all_pass = run_store_integration()
 
     sys.exit(0 if all_pass else 1)
 

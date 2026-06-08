@@ -1,39 +1,37 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-08T18:06:08.620Z",
-  "phase": "01",
-  "phase_name": "core-connect-device-awareness",
-  "phase_dir": "firestick-sideloading/.planning/phases/01-core-connect-device-awareness",
-  "plan": 0,
-  "task": 0,
-  "total_tasks": 3,
+  "timestamp": "2026-06-08T18:30:00.000Z",
+  "phase": "C0",
+  "phase_name": "relevance-ranking-memory-taxonomy",
+  "phase_dir": ".planning/spikes/SPIKE-C0",
+  "plan": 1,
+  "task": 1,
+  "total_tasks": 1,
   "status": "paused",
   "completed_tasks": [
-    {"id": "spike-a0", "name": "Awareness agent daemon skeleton", "status": "done", "commit": "70f63b0"},
-    {"id": "spike-b0", "name": "Claude Code integration wrapper", "status": "done", "commit": "d13c837"},
-    {"id": "spike-b0.1", "name": "Integration hardening (timeout, quoting, framing)", "status": "done", "commit": "fad0334"},
-    {"id": "fs-init", "name": "FireStick project init (research, roadmap, plans)", "status": "done", "commit": "9746744"},
-    {"id": "fs-wip", "name": "Phase 1 STATE.md + PLAN.md updates", "status": "in_progress", "progress": "minor dep fix in 01-03-PLAN.md, needs commit"}
+    {"id": "spike-a0", "name": "Daemon skeleton", "status": "done", "commit": "70f63b0"},
+    {"id": "spike-b0", "name": "Claude Code integration", "status": "done", "commit": "d13c837"},
+    {"id": "spike-b0.1", "name": "Integration hardening", "status": "done", "commit": "fad0334"},
+    {"id": "spike-c0", "name": "Memory taxonomy + FTS5 ranking prototype", "status": "done", "commit": "39eca3e"}
   ],
   "remaining_tasks": [
-    {"id": "fs-commit-wip", "name": "Commit firestick STATE.md + PLAN.md changes", "status": "not_started"},
-    {"id": "01-01", "name": "Go project scaffold, ADB runner, config, errors, stub commands", "status": "not_started"},
-    {"id": "01-02", "name": "DeviceService detect/connect/info/healthcheck/disconnect", "status": "not_started"},
-    {"id": "01-03", "name": "Arch setup automation, error classification hardening", "status": "not_started"}
+    {"id": "c1-store-wire", "name": "Wire recall_ranked into store.py recall()", "status": "not_started"},
+    {"id": "c1-session-wire", "name": "Wire ranked results into session_start.py", "status": "not_started"},
+    {"id": "c1-kind-auto", "name": "Add kind auto-detection in remember()", "status": "not_started"},
+    {"id": "c1-trigram", "name": "Add trigram tokenizer to FTS5", "status": "not_started"},
+    {"id": "c1-dedup", "name": "Add deduplication pass in recall", "status": "not_started"},
+    {"id": "c1-tests", "name": "Update A0/B0 smoke tests for ranked recall", "status": "not_started"}
   ],
   "blockers": [],
   "human_actions_pending": [],
   "decisions": [
-    {"decision": "Flat CLI command structure (firetv connect, firetv devices)", "rationale": "More ergonomic for focused tool, matches adb/fastboot conventions", "phase": "01"},
-    {"decision": "Shell out to adb binary, no native Go ADB library", "rationale": "No maintained Go ADB library exists, protocol is complex", "phase": "01"},
-    {"decision": "Viper + YAML config at ~/.config/firetv/config.yaml", "rationale": "Natural companion to Cobra, supports env var overrides", "phase": "awareness-b0"},
-    {"decision": "Hook passes paths via env vars, not shell interpolation", "rationale": "Handles paths with spaces/quotes safely", "phase": "awareness-b0.1"},
-    {"decision": "SessionStart context framed as untrusted via HTML comment", "rationale": "Mitigates prompt-injection from stored memories", "phase": "awareness-b0.1"}
+    {"decision": "FTS5 BM25 + heuristic ranking (no LLM)", "rationale": "Deterministic, explainable, no dependencies", "phase": "C0"},
+    {"decision": "recency half-life = 30 days", "rationale": "Balances recent relevance with historical value", "phase": "C0"},
+    {"decision": "pinned boost (0.5) > project match (0.4)", "rationale": "User-pinned memories should always surface", "phase": "C0"},
+    {"decision": "Taxonomy columns added via ALTER TABLE", "rationale": "Safe migration, preserves existing data", "phase": "C0"},
+    {"decision": "ranking.py is standalone (not integrated)", "rationale": "Spike-sized change; C1 does integration", "phase": "C0"}
   ],
-  "uncommitted_files": [
-    "firestick-sideloading/.planning/STATE.md",
-    "firestick-sideloading/.planning/phases/01-core-connect-device-awareness/01-03-PLAN.md"
-  ],
-  "next_action": "cd firestick-sideloading && git add .planning/STATE.md .planning/phases/01-core-connect-device-awareness/01-03-PLAN.md && git commit -m 'wip(01): update phase 1 state and plan deps' — then resume Plan 01-01 execution",
-  "context_notes": "Two projects in this repo: (1) awareness-agent spikes A0/B0/B0.1 complete and pushed; (2) firestick-sideloading Go CLI project with Phase 1 plans written but not yet executed. The firestick project has minor uncommitted WIP changes (STATE.md timestamp + PLAN.md dep fix). No blockers. Next work is executing Plan 01-01 (Go scaffold)."
+  "uncommitted_files": [],
+  "next_action": "C1: Wire recall_ranked() into store.py recall(), wire ranked results into session_start.py, add kind auto-detection, add trigram tokenizer, update smoke tests. See .planning/spikes/SPIKE-C0/.continue-here.md and docs/claude-code.md.",
+  "context_notes": "C0 spike complete — standalone ranking.py module with FTS5 + taxonomy + ranking. All 6 eval queries pass. Not yet integrated into store.py or session_start.py. Firestick-sideloading Phase 1 plans also exist but are a separate project track."
 }

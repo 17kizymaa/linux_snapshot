@@ -35,13 +35,21 @@ class MemoryScope:
 # Mapping from existing category strings to MemoryKind
 CATEGORY_TO_KIND: dict[str, str] = {
     "decision": MemoryKind.DECISION,
+    "dec": MemoryKind.DECISION,
     "preference": MemoryKind.PREFERENCE,
+    "pref": MemoryKind.PREFERENCE,
+    "prefer": MemoryKind.PREFERENCE,
     "fact": MemoryKind.FACT,
     "procedure": MemoryKind.PROCEDURE,
+    "proc": MemoryKind.PROCEDURE,
     "error": MemoryKind.ERROR,
+    "err": MemoryKind.ERROR,
+    "bug": MemoryKind.ERROR,
     "note": MemoryKind.NOTE,
     "task": MemoryKind.TASK,
+    "todo": MemoryKind.TASK,
     "pinned": MemoryKind.PINNED,
+    "pin": MemoryKind.PINNED,
 }
 
 
@@ -182,7 +190,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
     context,
     category,
     content=decisions,
-    content_rowid=id
+    content_rowid=id,
+    tokenize='trigram'
 );
 """
 
@@ -253,6 +262,66 @@ def migrate_fts5(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _jaccard_similarity(a: str, b: str) -> float:
+    """Character-level bigram Jaccard similarity between two strings."""
+    if not a or not b:
+        return 0.0
+    a_bigrams = set(a[i:i + 2] for i in range(len(a) - 1))
+    b_bigrams = set(b[i:i + 2] for i in range(len(b) - 1))
+    if not a_bigrams or not b_bigrams:
+        return 0.0
+    intersection = a_bigrams & b_bigrams
+    union = a_bigrams | b_bigrams
+    return len(intersection) / len(union)
+
+
+def _dedup_memories(
+    memories: list[dict[str, Any]],
+    threshold: float = 0.75,
+) -> list[dict[str, Any]]:
+    """Remove near-duplicate memories, keeping the higher-scored one.
+
+    Uses character-bigram Jaccard similarity on the decision text.
+    Only deduplicates among items that are adjacent in the ranked list
+    (i.e. likely to be similar).
+    """
+    if len(memories) <= 1:
+        return memories
+
+    kept: list[dict[str, Any]] = []
+    seen_texts: list[str] = []
+
+    for mem in memories:
+        decision = (mem.get("decision") or "").lower().strip()
+        is_dup = False
+        for seen in seen_texts:
+            if _jaccard_similarity(decision, seen) >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(mem)
+            seen_texts.append(decision)
+
+    return kept
+
+
+def _escape_fts5_query(query: str) -> str:
+    """Escape a user query for safe FTS5 MATCH usage.
+
+    Splits on whitespace, quotes each term to avoid FTS5 operators
+    (NOT, AND, OR, -, ^, *, etc.), and joins with AND.
+    Falls back to the original query if empty after escaping.
+    """
+    import re
+    # Split on whitespace, filter empty
+    terms = [t for t in query.strip().split() if t]
+    if not terms:
+        return ""
+    # Quote each term — double-quote wrapping prevents FTS5 operator parsing
+    escaped = " ".join(f'"{t}"' for t in terms)
+    return escaped
+
+
 def recall_ranked(
     conn: sqlite3.Connection,
     query: str = "",
@@ -272,6 +341,9 @@ def recall_ranked(
     limit = max(1, min(int(limit), 100))
 
     if query.strip():
+        fts_query = _escape_fts5_query(query)
+        if not fts_query:
+            return []
         # FTS5 search: join decisions with fts table for BM25 rank
         rows = conn.execute(
             """
@@ -287,7 +359,7 @@ def recall_ranked(
             ORDER BY fts.rank
             LIMIT ?
             """,
-            (query, limit * 3),  # over-fetch for post-ranking
+            (fts_query, limit * 3),  # over-fetch for post-ranking
         ).fetchall()
     else:
         # No query: return recent decisions, scored by metadata only
@@ -329,5 +401,8 @@ def recall_ranked(
         current_project_path=project_path,
         weights=weights,
     )
+
+    # Deduplicate near-identical decisions
+    ranked = _dedup_memories(ranked)
 
     return ranked[:limit]

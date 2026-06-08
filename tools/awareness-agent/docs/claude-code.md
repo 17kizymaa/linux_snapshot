@@ -145,6 +145,29 @@ tools/awareness-agent/
     └── claude-code.md        # This file
 ```
 
+## Spike C1 Results: Integration
+
+**Status:** complete
+
+### What was integrated
+
+- `store.py` `recall()` now uses `recall_ranked()` from `ranking.py` — FTS5 + heuristic scoring replaces LIKE queries
+- `store.py` `remember()` auto-detects `kind` via `category_to_kind()` and stores it in the new column
+- `session_start.py` `build_context_snippet()` groups memories by `kind` (pinned, preference, decision, error, procedure, note) instead of just category
+- FTS5 uses `trigram` tokenizer for partial matching (e.g. "test" matches "pytest")
+- FTS5 queries are escaped via `_escape_fts5_query()` to prevent operator injection (dashes, quotes, etc.)
+- Deduplication pass (`_dedup_memories()`) uses character-bigram Jaccard similarity (threshold 0.75) to remove near-identical decisions
+- Category aliases added: `dec`→decision, `pref`/`prefer`→preference, `proc`→procedure, `err`/`bug`→error, `todo`→task, `pin`→pinned
+- Smoke tests extended with Sections 16-21 covering all C1 features
+- All 21 smoke test sections pass; C0 eval 6/6 + store integration pass
+
+### Key design decisions
+
+- **FTS5 query escaping**: All user queries are split on whitespace and each term is double-quoted for FTS5 MATCH. This prevents `-` (NOT), `^` (prefix), `*` (wildcard), and column-filter syntax from causing errors or unexpected behavior.
+- **Trigram tokenizer**: Enables partial matching (3+ char substrings) without requiring full-word matches. Tradeoff: may return more false positives on very short terms.
+- **Deduplication**: Applied *after* ranking, before the final limit. Keeps the higher-scored duplicate. Uses Jaccard similarity on character bigrams — fast, no dependencies, works well for near-identical decision text.
+- **Category→Kind mapping**: Extended with common abbreviations so `remember("prefer: ...")` correctly maps to `kind=preference`.
+
 ## Spike C0 Results: Relevance/Ranking + Memory Taxonomy
 
 **Status:** prototype complete (commit `39eca3e`)
@@ -208,17 +231,16 @@ Run eval: `cd tools/awareness-agent && python3 tests/c0-eval.py --verbose`
 
 ### Open Questions
 
-1. **Integration path**: `ranking.py` is standalone — needs wiring into `store.py` `recall()` and `session_start.py` `build_context_snippet()`. C1 should do this integration.
-2. **FTS5 tokenization**: Default tokenizer works for English code terms. May need trigram tokenizer for partial matches (e.g. "test" matching "pytest").
-3. **Taxonomy population**: Existing `category` values need migration to `kind`. Auto-mapping covers common cases but user may need to review.
-4. **Embeddings**: FTS5 BM25 is good enough for C0. Semantic similarity (embeddings) deferred to C2+.
-5. **Deduplication**: Not yet implemented. Near-identical memories should be deduped at recall time.
+1. **Integration path**: ✅ Resolved in C1 — `recall_ranked()` is now the default `recall()` implementation.
+2. **FTS5 tokenization**: ✅ Resolved in C1 — trigram tokenizer enables partial matching.
+3. **Taxonomy population**: ✅ Resolved in C1 — `remember()` auto-detects `kind` from category; migration adds columns safely.
+4. **Embeddings**: FTS5 BM25 is good enough for C0/C1. Semantic similarity (embeddings) deferred to C2+.
+5. **Deduplication**: ✅ Resolved in C1 — bigram Jaccard similarity dedup in `recall_ranked()`.
 
-### Recommended C1 Next Steps
+### Recommended C2 Next Steps
 
-1. Wire `recall_ranked()` into `store.py` as the default `recall()` implementation
-2. Wire ranked results into `session_start.py` `build_context_snippet()`
-3. Add `kind` auto-detection in `remember()` based on category patterns
-4. Add trigram tokenizer to FTS5 for better partial matching
-5. Add deduplication pass in recall (near-identical decision text)
-6. Update A0/B0 smoke tests to cover ranked recall
+1. Add configurable per-kind TTL (error=90d, note=30d, decision=permanent, etc.)
+2. Add `scope` auto-detection in `remember()` based on context
+3. Consider embedding-based semantic recall for C2
+4. Add `confidence` scoring based on source and age
+5. Add memory export/import for backup and sharing

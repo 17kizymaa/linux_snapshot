@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from .paths import db_path, ensure_dirs, secure_chmod
+from .ranking import (
+    RankWeights,
+    category_to_kind,
+    migrate_fts5,
+    migrate_taxonomy,
+    recall_ranked,
+)
 from .redaction import redact_text
 
 SCHEMA = """
@@ -89,6 +96,8 @@ class AwarenessStore:
     def _migrate(self) -> None:
         with self.conn:
             self.conn.executescript(SCHEMA)
+        migrate_taxonomy(self.conn)
+        migrate_fts5(self.conn)
 
     def upsert_project(self, project: dict[str, Any]) -> int:
         path = project.get("root") or project.get("path")
@@ -154,12 +163,13 @@ class AwarenessStore:
                 decision = rest.strip()
 
         project_id = self.upsert_project(project) if project else None
+        kind = category_to_kind(parsed_category)
 
         with self.conn:
             cur = self.conn.execute(
                 """
-                INSERT INTO decisions(project_id, category, context, decision, rationale, source)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO decisions(project_id, category, context, decision, rationale, source, kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -168,43 +178,39 @@ class AwarenessStore:
                     decision,
                     redact_text(rationale),
                     redact_text(source) or "user",
+                    kind,
                 ),
             )
         self._secure_files()
         return int(cur.lastrowid)
 
-    def recall(self, query: str = "", limit: int = 10) -> list[dict[str, Any]]:
-        clean_query = (query or "").strip()
-        needle = f"%{clean_query}%"
-        limit = max(1, min(int(limit), 100))
+    def recall(
+        self,
+        query: str = "",
+        limit: int = 10,
+        *,
+        project_path: str | None = None,
+        weights: RankWeights | None = None,
+    ) -> list[dict[str, Any]]:
+        """Ranked recall using FTS5 + heuristic scoring.
 
-        rows = self.conn.execute(
-            """
-            SELECT
-                d.id,
-                d.timestamp,
-                d.category,
-                d.context,
-                d.decision,
-                d.rationale,
-                d.source,
-                p.name AS project_name,
-                p.path AS project_path
-            FROM decisions d
-            LEFT JOIN projects p ON p.id = d.project_id
-            WHERE
-                (? = '')
-                OR d.decision LIKE ?
-                OR d.context LIKE ?
-                OR d.rationale LIKE ?
-                OR d.category LIKE ?
-            ORDER BY d.timestamp DESC, d.id DESC
-            LIMIT ?
-            """,
-            (clean_query, needle, needle, needle, needle, limit),
-        ).fetchall()
+        Falls back to recency + metadata scoring when query is empty.
+        Results include '_score' and '_score_breakdown' when ranked.
+        """
+        return recall_ranked(
+            self.conn,
+            query,
+            project_path=project_path or self._current_project_path(),
+            limit=limit,
+            weights=weights,
+        )
 
-        return [dict(row) for row in rows]
+    def _current_project_path(self) -> str | None:
+        """Best-effort current project path from the most recently active project."""
+        row = self.conn.execute(
+            "SELECT path FROM projects ORDER BY last_active DESC LIMIT 1"
+        ).fetchone()
+        return row["path"] if row else None
 
     def status(self) -> dict[str, Any]:
         projects = self.conn.execute("SELECT COUNT(*) AS n FROM projects").fetchone()["n"]

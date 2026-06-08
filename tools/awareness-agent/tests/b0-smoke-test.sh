@@ -424,5 +424,164 @@ fi
 echo "[ok] context includes untrusted-data framing"
 
 # ============================================================
+# Section 16: FTS5 + taxonomy migration (C1)
+# ============================================================
+echo "=== Section 16: FTS5 + taxonomy migration ==="
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys, sqlite3
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    cols = {r[1] for r in store.conn.execute('PRAGMA table_info(decisions)')}
+    assert 'kind' in cols, f'missing kind column: {cols}'
+    assert 'scope' in cols, f'missing scope column: {cols}'
+    assert 'confidence' in cols, f'missing confidence column: {cols}'
+    assert 'tags' in cols, f'missing tags column: {cols}'
+    assert 'expires_at' in cols, f'missing expires_at column: {cols}'
+    assert 'pinned' in cols, f'missing pinned column: {cols}'
+    tables = {r[0] for r in store.conn.execute(\"SELECT name FROM sqlite_master WHERE type='table'\")}
+    assert 'decisions_fts' in tables, f'missing decisions_fts: {tables}'
+    print('taxonomy columns: ok')
+    print('fts5 table: ok')
+"
+
+echo "[ok] FTS5 + taxonomy migration applied"
+
+# ============================================================
+# Section 17: Kind auto-detection in remember() (C1)
+# ============================================================
+echo "=== Section 17: Kind auto-detection ==="
+
+KIND_TOKEN="kind-test-$(date +%s)-$$"
+awareness remember "decision: use PostgreSQL for production $KIND_TOKEN" >/dev/null
+awareness remember "prefer: functional style over classes $KIND_TOKEN" >/dev/null
+awareness remember "error: sqlite locked — restart daemon $KIND_TOKEN" >/dev/null
+awareness remember "note: consider migrating to APIRouter $KIND_TOKEN" >/dev/null
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys, json
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    rows = store.recall('$KIND_TOKEN', limit=10)
+    kinds = {r['decision'].split(' ')[0].lower(): r.get('kind', '') for r in rows}
+    print('kinds found:', json.dumps(kinds, indent=2))
+    assert kinds.get('use') == 'decision', f'expected decision, got {kinds.get(\"use\")}'
+    assert kinds.get('functional') == 'preference', f'expected preference, got {kinds.get(\"functional\")}'
+    assert kinds.get('sqlite') == 'error', f'expected error, got {kinds.get(\"sqlite\")}'
+    assert kinds.get('consider') == 'note', f'expected note, got {kinds.get(\"consider\")}'
+"
+
+echo "[ok] kind auto-detection works for decision/preference/error/note"
+
+# ============================================================
+# Section 18: Ranked recall via FTS5 (C1)
+# ============================================================
+echo "=== Section 18: Ranked recall ==="
+
+RANK_TOKEN="rank-test-$(date +%s)-$$"
+awareness remember "decision: use pytest for FastAPI tests $RANK_TOKEN" >/dev/null
+awareness remember "preference: keep DB files at mode 0600 $RANK_TOKEN" >/dev/null
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys, json
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    results = store.recall('pytest', limit=5, project_path='$PROJECT_DIR')
+    assert len(results) > 0, 'no results for pytest query'
+    assert '_score' in results[0], f'missing _score: {list(results[0].keys())}'
+    assert '_score_breakdown' in results[0], f'missing _score_breakdown'
+    print(f'  top result: {results[0][\"decision\"][:60]}')
+    print(f'  score: {results[0][\"_score\"]}')
+    print(f'  breakdown: {json.dumps(results[0][\"_score_breakdown\"], indent=4)}')
+"
+
+echo "[ok] ranked recall returns scored results"
+
+# ============================================================
+# Section 19: Trigram tokenizer partial matching (C1)
+# ============================================================
+echo "=== Section 19: Trigram tokenizer ==="
+
+TRIGRAM_TOKEN="trigram-test-$(date +%s)-$$"
+awareness remember "decision: pytest-asyncio for async test functions $TRIGRAM_TOKEN" >/dev/null
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    results = store.recall('pytest', limit=10)
+    found = any('pytest-asyncio' in r.get('decision', '') for r in results)
+    assert found, f'trigram match failed: {[r[\"decision\"] for r in results]}'
+    print(f'  trigram match: {[r[\"decision\"][:50] for r in results if \"pytest\" in r.get(\"decision\", \"\")]}')
+"
+
+echo "[ok] trigram tokenizer enables partial matching"
+
+# ============================================================
+# Section 20: Deduplication (C1)
+# ============================================================
+echo "=== Section 20: Deduplication ==="
+
+DEDUP_TOKEN="dedup-test-$(date +%s)-$$"
+awareness remember "decision: use pytest for all tests $DEDUP_TOKEN v1" >/dev/null
+awareness remember "decision: use pytest for all tests $DEDUP_TOKEN v2" >/dev/null
+awareness remember "decision: use mypy for type checking $DEDUP_TOKEN" >/dev/null
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    # Query for pytest - should get the deduped pytest result (v1 or v2, not both)
+    results = store.recall('pytest', limit=10)
+    decisions = [r['decision'] for r in results]
+    print(f'  results: {[d[:60] for d in decisions]}')
+    pytest_count = sum(1 for d in decisions if 'pytest' in d and 'v1' in d or 'pytest' in d and 'v2' in d)
+    # Also query for mypy to verify it's still there
+    results_mypy = store.recall('mypy', limit=10)
+    mypy_count = sum(1 for r in results_mypy if 'mypy' in r.get('decision', ''))
+    assert pytest_count == 1, f'expected 1 pytest result (deduped), got {pytest_count}: {decisions}'
+    assert mypy_count == 1, f'expected 1 mypy result, got {mypy_count}'
+"
+
+echo "[ok] near-duplicate decisions are deduplicated"
+
+# ============================================================
+# Section 21: SessionStart uses kind-based grouping (C1)
+# ============================================================
+echo "=== Section 21: SessionStart kind-based grouping ==="
+
+GROUP_TOKEN="group-test-$(date +%s)-$$"
+PROJECT_GROUP="$TMP/fake-project-group"
+mkdir -p "$PROJECT_GROUP"
+cd "$PROJECT_GROUP"
+git init -q 2>/dev/null || true
+git config user.email "test@test.local"
+git config user.name "Test"
+
+awareness claude install --project "$PROJECT_GROUP" --session-start >/dev/null 2>&1
+
+awareness remember "decision: use hexagonal architecture $GROUP_TOKEN" >/dev/null
+awareness remember "preference: prefer composition over inheritance $GROUP_TOKEN" >/dev/null
+awareness remember "error: database locked - restart daemon $GROUP_TOKEN" >/dev/null
+awareness remember "procedure: deploy via make build && make push $GROUP_TOKEN" >/dev/null
+
+CONTEXT_GROUP=$(awareness claude session-start --project "$PROJECT_GROUP" --max-chars 5000 2>/dev/null)
+echo "$CONTEXT_GROUP" > "$TMP/context-group.txt"
+
+grep -q "Recent decisions:" "$TMP/context-group.txt"
+grep -q "Relevant preferences:" "$TMP/context-group.txt"
+grep -q "Known errors:" "$TMP/context-group.txt"
+grep -q "Procedures:" "$TMP/context-group.txt"
+
+awareness claude uninstall --project "$PROJECT_GROUP" >/dev/null 2>&1
+
+echo "[ok] SessionStart groups memories by kind"
+
+# ============================================================
 echo ""
-echo "[ok] awareness-agent spike B0.1 hardening tests passed"
+echo "[ok] awareness-agent spike C1 integration tests passed"

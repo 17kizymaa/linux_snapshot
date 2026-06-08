@@ -113,15 +113,18 @@ def build_context_snippet(
     if framework:
         lines.append(f"Framework: {redact_text(framework)}")
 
-    # Fetch recent memories scoped to current project
+    # Fetch recent memories scoped to current project (ranked)
     cwd_str = cwd or os.getcwd()
     memories: list[dict[str, Any]] = []
     try:
         with AwarenessStore() as store:
-            all_memories = store.recall("", limit=max_memories * 3)
+            project_root = project.get("root") or project.get("path")
+            all_memories = store.recall(
+                "", limit=max_memories * 3, project_path=project_root
+            )
             memories = [
                 m for m in all_memories
-                if not m.get("project_path") or m.get("project_path") == project.get("root") or m.get("project_path") == project.get("path")
+                if not m.get("project_path") or m.get("project_path") == project_root
             ][:max_memories]
     except Exception:
         pass
@@ -130,9 +133,25 @@ def build_context_snippet(
         lines.append("")
         lines.append("(no stored memories)")
     else:
-        preferences = [m for m in memories if m.get("category") == "preference"]
-        decisions = [m for m in memories if m.get("category") == "decision"]
-        notes = [m for m in memories if m.get("category") not in ("preference", "decision")]
+        # Group by kind (from taxonomy) with fallback to category
+        from .ranking import category_to_kind
+
+        def _kind(m: dict[str, Any]) -> str:
+            return m.get("kind") or category_to_kind(m.get("category", "note"))
+
+        preferences = [m for m in memories if _kind(m) == "preference"]
+        decisions = [m for m in memories if _kind(m) == "decision"]
+        pinned = [m for m in memories if _kind(m) == "pinned"]
+        errors = [m for m in memories if _kind(m) == "error"]
+        procedures = [m for m in memories if _kind(m) == "procedure"]
+        notes = [m for m in memories if _kind(m) in ("note", "fact", "task")]
+
+        if pinned:
+            lines.append("")
+            lines.append("Pinned:")
+            for m in pinned[:2]:
+                text = redact_text(m.get("decision", ""))
+                lines.append(f"  - {text}")
 
         if preferences:
             lines.append("")
@@ -145,6 +164,20 @@ def build_context_snippet(
             lines.append("")
             lines.append("Recent decisions:")
             for m in decisions[:4]:
+                text = redact_text(m.get("decision", ""))
+                lines.append(f"  - {text}")
+
+        if errors:
+            lines.append("")
+            lines.append("Known errors:")
+            for m in errors[:2]:
+                text = redact_text(m.get("decision", ""))
+                lines.append(f"  - {text}")
+
+        if procedures:
+            lines.append("")
+            lines.append("Procedures:")
+            for m in procedures[:2]:
                 text = redact_text(m.get("decision", ""))
                 lines.append(f"  - {text}")
 
