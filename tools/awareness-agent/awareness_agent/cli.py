@@ -327,6 +327,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lines", type=int, default=80)
     p.set_defaults(func=cmd_logs)
 
+    # claude integration subcommand
+    from .integrations import add_claude_subparser
+    add_claude_subparser(sub)
+
     return parser
 
 
