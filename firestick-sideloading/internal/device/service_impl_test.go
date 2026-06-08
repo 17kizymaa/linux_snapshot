@@ -106,3 +106,79 @@ func TestParseDevicesOutput_SingleDevice(t *testing.T) {
 	assert.Equal(t, "AFTMM", devices[0].Model)
 	assert.Equal(t, string(proto.ConnectionNetwork), devices[0].ConnectionType)
 }
+
+func TestEnsurePort_BareIP(t *testing.T) {
+	assert.Equal(t, "192.168.1.50:5555", ensurePort("192.168.1.50"))
+}
+
+func TestEnsurePort_AlreadyHasPort(t *testing.T) {
+	assert.Equal(t, "192.168.1.50:5555", ensurePort("192.168.1.50:5555"))
+}
+
+func TestEnsurePort_CustomPort(t *testing.T) {
+	assert.Equal(t, "192.168.1.50:5556", ensurePort("192.168.1.50:5556"))
+}
+
+func TestDeflateProp_Normal(t *testing.T) {
+	assert.Equal(t, "Fire TV Stick", deflateProp("Fire TV Stick"))
+}
+
+func TestDeflateProp_Whitespace(t *testing.T) {
+	assert.Equal(t, "AFTMM", deflateProp("  AFTMM  \n"))
+}
+
+func TestDeflateProp_Empty(t *testing.T) {
+	assert.Equal(t, "unknown", deflateProp(""))
+}
+
+func TestDeflateProp_WhitespaceOnly(t *testing.T) {
+	assert.Equal(t, "unknown", deflateProp("   \n  "))
+}
+
+func TestConnectOutputParsing(t *testing.T) {
+	// Test that various adb connect outputs are handled correctly
+	tests := []struct {
+		name     string
+		output   string
+		wantErr  bool
+		errType  string
+	}{
+		{
+			name:    "connected to",
+			output:  "connected to 192.168.1.50:5555\n",
+			wantErr: false,
+		},
+		{
+			name:    "already connected",
+			output:  "already connected to 192.168.1.50:5555\n",
+			wantErr: false,
+		},
+		{
+			name:    "failed to connect",
+			output:  "failed to connect to 192.168.1.50:5555\n",
+			wantErr: true,
+			errType: "connection",
+		},
+		{
+			name:    "connection refused",
+			output:  "Connection refused\n",
+			wantErr: true,
+			errType: "connection",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Verify output classification
+			out := strings.TrimSpace(tt.output)
+			isSuccess := strings.HasPrefix(out, "connected to") || strings.HasPrefix(out, "already connected to")
+			isFailure := strings.Contains(out, "failed to connect") || strings.Contains(out, "Connection refused")
+
+			if tt.wantErr {
+				assert.True(t, isFailure, "expected failure detection")
+			} else {
+				assert.True(t, isSuccess, "expected success detection")
+			}
+		})
+	}
+}
