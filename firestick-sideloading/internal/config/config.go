@@ -22,23 +22,24 @@ type AppConfig struct {
 // InitConfig bootstraps Viper: config search paths, env prefix, defaults,
 // and auto-creates ~/.config/firetv/config.yaml on first run.
 func InitConfig() error {
-	v := viper.New()
+	viper.SetConfigName("firetv")
+	viper.SetConfigType("yaml")
+	home, err := os.UserHomeDir()
+	if err == nil {
+		viper.AddConfigPath(filepath.Join(home, ".config", "firetv"))
+	}
+	viper.AddConfigPath(".")
 
-	v.SetConfigName("firetv")
-	v.SetConfigType("yaml")
-	v.AddConfigPath("$HOME/.config/firetv")
-	v.AddConfigPath(".")
+	viper.SetEnvPrefix("FIRETV")
+	viper.AutomaticEnv()
 
-	v.SetEnvPrefix("FIRETV")
-	v.AutomaticEnv()
+	viper.SetDefault("adb.timeout", "30s")
+	viper.SetDefault("adb.server", "127.0.0.1:5037")
+	viper.SetDefault("adb.bind", "127.0.0.1")
+	viper.SetDefault("log.level", "info")
+	viper.SetDefault("device.default", "")
 
-	v.SetDefault("adb.timeout", "30s")
-	v.SetDefault("adb.server", "127.0.0.1:5037")
-	v.SetDefault("adb.bind", "127.0.0.1")
-	v.SetDefault("log.level", "info")
-	v.SetDefault("device.default", "")
-
-	if err := v.ReadInConfig(); err != nil {
+	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			home, herr := os.UserHomeDir()
 			if herr != nil {
@@ -64,8 +65,8 @@ func InitConfig() error {
 				return fmt.Errorf("write default config: %w", werr)
 			}
 			// Re-read to populate viper
-			v.SetConfigFile(configPath)
-			if rerr := v.ReadInConfig(); rerr != nil {
+			viper.SetConfigFile(configPath)
+			if rerr := viper.ReadInConfig(); rerr != nil {
 				return fmt.Errorf("read default config: %w", rerr)
 			}
 		} else {
