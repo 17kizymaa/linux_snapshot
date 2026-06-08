@@ -7,7 +7,7 @@
   "plan": 1,
   "task": 1,
   "total_tasks": 1,
-  "status": "complete",
+  "status": "paused",
   "completed_tasks": [
     {"id": "spike-a0", "name": "Daemon skeleton", "status": "done", "commit": "70f63b0"},
     {"id": "spike-b0", "name": "Claude Code integration", "status": "done", "commit": "d13c837"},
