@@ -10,7 +10,10 @@ from .paths import db_path, ensure_dirs, secure_chmod
 from .ranking import (
     RankWeights,
     category_to_kind,
+    compute_expires_at,
+    detect_scope,
     migrate_fts5,
+    migrate_kind_ttls,
     migrate_taxonomy,
     recall_ranked,
 )
@@ -98,6 +101,7 @@ class AwarenessStore:
             self.conn.executescript(SCHEMA)
         migrate_taxonomy(self.conn)
         migrate_fts5(self.conn)
+        migrate_kind_ttls(self.conn)
 
     def upsert_project(self, project: dict[str, Any]) -> int:
         path = project.get("root") or project.get("path")
@@ -164,12 +168,25 @@ class AwarenessStore:
 
         project_id = self.upsert_project(project) if project else None
         kind = category_to_kind(parsed_category)
+        expires_at = compute_expires_at(self.conn, kind)
+
+        # Gather known project paths for scope detection
+        known_paths = [
+            row[0] for row in self.conn.execute("SELECT path FROM projects").fetchall()
+        ]
+        scope = detect_scope(
+            kind=kind,
+            context=context,
+            decision=decision,
+            project_id=project_id,
+            known_project_paths=known_paths,
+        )
 
         with self.conn:
             cur = self.conn.execute(
                 """
-                INSERT INTO decisions(project_id, category, context, decision, rationale, source, kind)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO decisions(project_id, category, context, decision, rationale, source, kind, expires_at, scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -179,6 +196,8 @@ class AwarenessStore:
                     redact_text(rationale),
                     redact_text(source) or "user",
                     kind,
+                    expires_at,
+                    scope,
                 ),
             )
         self._secure_files()
@@ -189,7 +208,7 @@ class AwarenessStore:
         query: str = "",
         limit: int = 10,
         *,
-        project_path: str | None = None,
+        project_path: str | None | type(...) = ...,
         weights: RankWeights | None = None,
     ) -> list[dict[str, Any]]:
         """Ranked recall using FTS5 + heuristic scoring.
@@ -197,13 +216,32 @@ class AwarenessStore:
         Falls back to recency + metadata scoring when query is empty.
         Results include '_score' and '_score_breakdown' when ranked.
         """
+        if project_path is ...:
+            project_path = self._current_project_path()
         return recall_ranked(
             self.conn,
             query,
-            project_path=project_path or self._current_project_path(),
+            project_path=project_path,
             limit=limit,
             weights=weights,
         )
+
+    def sweep(self) -> int:
+        """Hard-delete expired rows. Returns the number of rows removed.
+
+        Safe to call at any time. Recall already filters expired rows
+        lazily, so sweep is optional cleanup, not required for correctness.
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                DELETE FROM decisions
+                WHERE expires_at IS NOT NULL
+                  AND expires_at <= datetime('now')
+                """
+            )
+        self._secure_files()
+        return cur.rowcount
 
     def _current_project_path(self) -> str | None:
         """Best-effort current project path from the most recently active project."""

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +75,124 @@ class RankWeights:
 
     # Decay: half-life in days. 0 = no decay.
     recency_half_life_days: float = 30.0
+
+
+# ---------------------------------------------------------------------------
+# Per-kind TTL config
+# ---------------------------------------------------------------------------
+
+# Default TTL (in days) per memory kind.  None = never expires.
+KIND_TTL_DEFAULTS: dict[str, int | None] = {
+    MemoryKind.DECISION: None,      # permanent
+    MemoryKind.PREFERENCE: None,    # permanent
+    MemoryKind.FACT: None,          # permanent
+    MemoryKind.PROCEDURE: None,     # permanent
+    MemoryKind.ERROR: 90,           # 90 days
+    MemoryKind.NOTE: 30,            # 30 days
+    MemoryKind.TASK: 30,            # 30 days
+    MemoryKind.PINNED: None,        # permanent
+}
+
+# Config table for runtime TTL overrides.
+KIND_TTL_TABLE = """
+CREATE TABLE IF NOT EXISTS kind_ttls (
+    kind TEXT PRIMARY KEY,
+    ttl_days INTEGER  -- NULL = never expires
+);
+"""
+
+
+def migrate_kind_ttls(conn: sqlite3.Connection) -> None:
+    """Create kind_ttls config table and seed defaults."""
+    conn.executescript(KIND_TTL_TABLE)
+    # Seed defaults (idempotent)
+    for kind, ttl in KIND_TTL_DEFAULTS.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO kind_ttls(kind, ttl_days) VALUES (?, ?)",
+            (kind, ttl),
+        )
+    conn.commit()
+
+
+def get_ttl_days(conn: sqlite3.Connection, kind: str) -> int | None:
+    """Look up TTL for a kind. Falls back to KIND_TTL_DEFAULTS, then 30."""
+    row = conn.execute(
+        "SELECT ttl_days FROM kind_ttls WHERE kind = ?", (kind,)
+    ).fetchone()
+    if row is not None:
+        return row[0]  # could be None (never expires)
+    return KIND_TTL_DEFAULTS.get(kind, 30)
+
+
+def compute_expires_at(
+    conn: sqlite3.Connection, kind: str, now: datetime | None = None,
+) -> str | None:
+    """Return ISO-8601 expiry timestamp for a kind, or None for no expiry."""
+    ttl = get_ttl_days(conn, kind)
+    if ttl is None:
+        return None  # never expires
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return (now + timedelta(days=ttl)).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Scope auto-detection
+# ---------------------------------------------------------------------------
+
+# Keywords that suggest a memory is project-specific when found in context/decision.
+_PROJECT_SIGNS = ("cwd=", "project", "repo", "deploy", "build", "makefile",
+                  "package.json", "setup.py", "cargo.toml", "go.mod",
+                  "requirements.txt", "dockerfile", "docker-compose")
+
+# Kinds that default to global unless project context is detected.
+_GLOBAL_KINDS = {MemoryKind.PREFERENCE, MemoryKind.PINNED}
+
+
+def detect_scope(
+    *,
+    kind: str,
+    context: str,
+    decision: str,
+    project_id: int | None,
+    known_project_paths: list[str] | None = None,
+) -> str:
+    """Deterministic scope auto-detection.
+
+    Heuristic:
+      1. If no project association (project_id is None) and no project paths
+         referenced in context/decision → GLOBAL.
+      2. If kind is preference/pinned and context has no project path reference
+         → GLOBAL (cross-cutting preferences).
+      3. If context or decision text references a known project path → PROJECT.
+      4. If project_id is set and context contains cwd= or project signals → PROJECT.
+      5. Fail-closed default: PROJECT (safe — won't leak, just narrower).
+
+    Returns one of MemoryScope.GLOBAL or MemoryScope.PROJECT.
+    """
+    text = f"{context} {decision}".lower()
+
+    # Check if any known project path appears in the text
+    if known_project_paths:
+        for p in known_project_paths:
+            if p.lower() in text:
+                return MemoryScope.PROJECT
+
+    # Check for project-specific signals in text
+    for sign in _PROJECT_SIGNS:
+        if sign in text:
+            return MemoryScope.PROJECT
+
+    # If project_id is set, the memory was explicitly associated with a project
+    if project_id is not None:
+        return MemoryScope.PROJECT
+
+    # Preferences/pinned without project signals → global
+    if kind in _GLOBAL_KINDS:
+        return MemoryScope.GLOBAL
+
+    # Fail-closed: default to project (narrower, safer)
+    return MemoryScope.PROJECT
 
 
 # ---------------------------------------------------------------------------
@@ -340,13 +458,28 @@ def recall_ranked(
 
     limit = max(1, min(int(limit), 100))
 
+    # Build project-scoped filtering SQL fragment.
+    # scope=NULL or scope='global' always passes.
+    # scope='project' passes only when project_path matches that memory's project.
+    # When no project_path is set, scope='project' memories are excluded
+    # (they belong to a specific project, not the global context).
+    if project_path:
+        scope_filter = (
+            "(d.scope IS NULL OR d.scope = 'global' "
+            " OR (d.scope = 'project' AND p.path = ?))"
+        )
+        scope_params: tuple = (project_path,)
+    else:
+        scope_filter = "(d.scope IS NULL OR d.scope = 'global' OR d.scope != 'project')"
+        scope_params = ()
+
     if query.strip():
         fts_query = _escape_fts5_query(query)
         if not fts_query:
             return []
         # FTS5 search: join decisions with fts table for BM25 rank
         rows = conn.execute(
-            """
+            f"""
             SELECT d.id, d.timestamp, d.category, d.context, d.decision,
                    d.rationale, d.source, d.kind, d.scope, d.confidence,
                    d.tags, d.expires_at, d.pinned,
@@ -356,10 +489,11 @@ def recall_ranked(
             JOIN decisions d ON d.id = fts.rowid
             LEFT JOIN projects p ON p.id = d.project_id
             WHERE decisions_fts MATCH ?
+              AND {scope_filter}
             ORDER BY fts.rank
             LIMIT ?
             """,
-            (fts_query, limit * 3),  # over-fetch for post-ranking
+            (fts_query, *scope_params, limit * 3),  # over-fetch for post-ranking
         ).fetchall()
     else:
         # No query: return recent decisions, scored by metadata only
@@ -378,10 +512,11 @@ def recall_ranked(
             FROM decisions d
             LEFT JOIN projects p ON p.id = d.project_id
             WHERE {expire_filter}
+              AND {scope_filter}
             ORDER BY d.timestamp DESC, d.id DESC
             LIMIT ?
             """,
-            (limit * 3,),
+            (*scope_params, limit * 3),
         ).fetchall()
 
     # Filter expired

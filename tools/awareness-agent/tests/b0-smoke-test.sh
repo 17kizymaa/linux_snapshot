@@ -583,5 +583,189 @@ awareness claude uninstall --project "$PROJECT_GROUP" >/dev/null 2>&1
 echo "[ok] SessionStart groups memories by kind"
 
 # ============================================================
+# Section 22: Per-kind TTL (C2a)
+# ============================================================
+echo "=== Section 22: Per-kind TTL ==="
+
+TTL_TOKEN="ttl-test-$(date +%s)-$$"
+
+# --- 22a: Insert a note with a short TTL and backdate it past expiry ---
+# Use the Python API directly to set a backdated expires_at
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys, sqlite3
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+from datetime import datetime, timezone, timedelta
+
+with AwarenessStore() as store:
+    # Insert a note that expired 5 days ago (note TTL = 30d, backdate 35d)
+    store.remember('note: this note is expired $TTL_TOKEN', category='note', source='test')
+    expired_ts = (datetime.now(timezone.utc) - timedelta(days=35)).isoformat()
+    store.conn.execute(\"UPDATE decisions SET expires_at = ? WHERE decision LIKE ?\", (expired_ts, '%$TTL_TOKEN%'))
+    store.conn.commit()
+    print('[info] inserted expired note with backdated expires_at')
+"
+
+# Verify the expired note is excluded from recall
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    results = store.recall('$TTL_TOKEN', limit=10)
+    found = any('$TTL_TOKEN' in r.get('decision', '') for r in results)
+    if found:
+        print('[fail] expired note was returned by recall', file=sys.stderr)
+        sys.exit(1)
+    print('[ok] expired note excluded from recall')
+"
+
+# --- 22b: Insert a decision (no TTL) and verify it persists ---
+awareness remember "decision: use permanent storage for $TTL_TOKEN" >/dev/null
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    # Check expires_at IS NULL for the decision row (never expires)
+    # Filter to the decision row specifically (not the expired note from 22a)
+    row = store.conn.execute(\"SELECT kind, expires_at FROM decisions WHERE decision LIKE ? AND kind = 'decision'\", ('%$TTL_TOKEN%',)).fetchone()
+    assert row is not None, 'decision not found'
+    assert row[1] is None, f'decision should have NULL expires_at, got {row[1]}'
+    print(f'[ok] decision kind={row[0]} has no expiry (expires_at is NULL)')
+
+    # Verify it is returned by recall (expired note excluded, decision included)
+    results = store.recall('$TTL_TOKEN', limit=10)
+    found_decision = any('$TTL_TOKEN' in r.get('decision', '') and r.get('kind') == 'decision' for r in results)
+    found_expired = any('$TTL_TOKEN' in r.get('decision', '') and r.get('kind') == 'note' for r in results)
+    assert found_decision, 'decision without TTL not returned in recall'
+    assert not found_expired, 'expired note should not be returned'
+    print('[ok] no-TTL decision is returned in recall, expired note excluded')
+"
+
+# --- 22c: Run sweep() and verify expired rows deleted, others remain ---
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    # Count before sweep
+    before_expired = store.conn.execute(\"SELECT COUNT(*) FROM decisions WHERE decision LIKE ?\", ('%$TTL_TOKEN% expired%',)).fetchone()[0]
+    before_decision = store.conn.execute(\"SELECT COUNT(*) FROM decisions WHERE decision LIKE ? AND kind = 'decision'\", ('%$TTL_TOKEN%',)).fetchone()[0]
+    print(f'[info] before sweep: expired={before_expired}, decision={before_decision}')
+
+    # Run sweep
+    swept = store.sweep()
+    print(f'[info] sweep() removed {swept} rows')
+
+    # Count after sweep
+    after_expired = store.conn.execute(\"SELECT COUNT(*) FROM decisions WHERE decision LIKE ?\", ('%$TTL_TOKEN% expired%',)).fetchone()[0]
+    after_decision = store.conn.execute(\"SELECT COUNT(*) FROM decisions WHERE decision LIKE ? AND kind = 'decision'\", ('%$TTL_TOKEN%',)).fetchone()[0]
+    assert after_expired == 0, f'expired row still present after sweep: {after_expired}'
+    assert after_decision == 1, f'decision row missing after sweep: {after_decision}'
+    print('[ok] sweep removed expired row, kept decision row')
+"
+
+# --- 22d: Verify sweep is safe when already clean ---
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    swept2 = store.sweep()
+    assert swept2 == 0, f'sweep should find nothing, removed {swept2}'
+    print('[ok] sweep on clean DB is a no-op (removed 0)')
+"
+
+echo "[ok] per-kind TTL works correctly"
+
+# ============================================================
+# Section 23: Scope auto-detection (C2b)
+# ============================================================
+echo "=== Section 23: Scope auto-detection ==="
+
+SCOPE_TOKEN="scope-test-$(date +%s)-$$"
+PROJECT_A="$TMP/fake-project-A"
+PROJECT_B="$TMP/fake-project-B"
+
+mkdir -p "$PROJECT_A" "$PROJECT_B"
+cd "$PROJECT_A" && git init -q 2>/dev/null || true && git config user.email "test@test.local" && git config user.name "Test"
+cd "$PROJECT_B" && git init -q 2>/dev/null || true && git config user.email "test@test.local" && git config user.name "Test"
+
+# --- 23a: Project-specific memory gets scope=project ---
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    mid = store.remember('decision: use hexagonal architecture $SCOPE_TOKEN', category='decision', context='cwd=$PROJECT_A', source='user', project={'root': '$PROJECT_A', 'name': 'project-A'})
+    row = store.conn.execute('SELECT scope, project_id FROM decisions WHERE id = ?', (mid,)).fetchone()
+    assert row[0] == 'project', f'expected project scope, got {row[0]}'
+    assert row[1] is not None, 'expected project_id to be set'
+    print(f'[ok] project-specific memory: scope={row[0]}, project_id={row[1]}')
+"
+
+# --- 23b: Global-preference memory gets scope=global ---
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    mid = store.remember('preference: prefer tabs over spaces $SCOPE_TOKEN', category='preference', context='general style preference', source='user')
+    row = store.conn.execute('SELECT scope, project_id FROM decisions WHERE id = ?', (mid,)).fetchone()
+    assert row[0] == 'global', f'expected global scope, got {row[0]}'
+    print(f'[ok] global preference memory: scope={row[0]}, project_id={row[1]}')
+"
+
+# --- 23c: Cross-project isolation at recall ---
+# Store a project-B-specific memory, then recall from project-A
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+import sys
+sys.path.insert(0, '$AGENT_ROOT')
+from awareness_agent.store import AwarenessStore
+with AwarenessStore() as store:
+    # Store project-B-specific memory
+    store.remember('decision: use Cobra for CLI $SCOPE_TOKEN', category='decision', context='cwd=$PROJECT_B', source='user', project={'root': '$PROJECT_B', 'name': 'project-B'})
+
+    # Store global memory
+    store.remember('preference: keep files at mode 0600 $SCOPE_TOKEN', category='preference', context='security invariant', source='user')
+
+    # Recall from project-A: should see global + project-A, NOT project-B
+    results_a = store.recall('$SCOPE_TOKEN', limit=20, project_path='$PROJECT_A')
+    decisions_a = [r['decision'] for r in results_a]
+    print(f'  project-A recall: {[d[:50] for d in decisions_a]}')
+
+    # Should see: hexagonal (project-A), tabs-over-spaces (global), mode-0600 (global)
+    assert any('hexagonal' in d for d in decisions_a), 'project-A memory missing'
+    assert any('tabs' in d for d in decisions_a), 'global preference missing from project-A'
+    assert any('0600' in d for d in decisions_a), 'global preference missing from project-A'
+    assert not any('Cobra' in d for d in decisions_a), f'project-B memory leaked into project-A: {decisions_a}'
+    print('[ok] project-A recall: project-A + global only, no project-B leak')
+
+    # Recall from project-B: should see global + project-B, NOT project-A
+    results_b = store.recall('$SCOPE_TOKEN', limit=20, project_path='$PROJECT_B')
+    decisions_b = [r['decision'] for r in results_b]
+    print(f'  project-B recall: {[d[:50] for d in decisions_b]}')
+
+    assert any('Cobra' in d for d in decisions_b), 'project-B memory missing'
+    assert any('0600' in d for d in decisions_b), 'global preference missing from project-B'
+    assert not any('hexagonal' in d for d in decisions_b), f'project-A memory leaked into project-B: {decisions_b}'
+    print('[ok] project-B recall: project-B + global only, no project-A leak')
+
+    # Recall with no project (global=None): should see global only
+    results_global = store.recall('$SCOPE_TOKEN', limit=20, project_path=None)
+    decisions_global = [r['decision'] for r in results_global]
+    print(f'  global recall: {[d[:50] for d in decisions_global]}')
+
+    assert any('0600' in d for d in decisions_global), 'global preference missing in global recall'
+    assert not any('hexagonal' in d for d in decisions_global), f'project-A leaked into global: {decisions_global}'
+    assert not any('Cobra' in d for d in decisions_global), f'project-B leaked into global: {decisions_global}'
+    print('[ok] global recall: global-only memories only')
+"
+
+echo "[ok] scope auto-detection and cross-project isolation work correctly"
+
+# ============================================================
 echo ""
-echo "[ok] awareness-agent spike C1 integration tests passed"
+echo "[ok] awareness-agent spike C2b scope auto-detection tests passed"

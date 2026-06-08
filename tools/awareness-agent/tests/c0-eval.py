@@ -26,6 +26,7 @@ from awareness_agent.ranking import (
     MemoryScope,
     RankWeights,
     category_to_kind,
+    migrate_kind_ttls,
     migrate_taxonomy,
     migrate_fts5,
     recall_ranked,
@@ -69,9 +70,10 @@ def create_test_db() -> sqlite3.Connection:
         );
     """)
 
-    # Migrate taxonomy columns + FTS5
+    # Migrate taxonomy columns + FTS5 + kind_ttls
     migrate_taxonomy(conn)
     migrate_fts5(conn)
+    migrate_kind_ttls(conn)
 
     return conn
 
@@ -183,7 +185,7 @@ def seed_fixtures(conn: sqlite3.Connection) -> None:
          "Mapped in initial repo cartography", "user",
          MemoryKind.NOTE, MemoryScope.GLOBAL, 0.4,
          '["repo", "aetherOS", "odysseus"]',
-         _now(-30), 0),  # expired 30 days ago
+         _now(30), 0),  # expired 30 days ago
 
         (15, None, _now(0.01), "pinned", "cwd=/home/user",
          "ABCD: Always Be Closing Daemon — never leave orphan processes",
@@ -311,6 +313,65 @@ def run_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
         expected_top3_kinds=[MemoryKind.DECISION, MemoryKind.ERROR, MemoryKind.FACT],
         expected_top1_substring="Cobra",
     )
+
+    # ── Query 7: TTL expiry filter (C2a) ────────────────────
+    # Memory #14 (aetherOS fork note) has a backdated expires_at 30 days ago.
+    # It should be excluded from ALL recall results.
+    # A query for "aetherOS" that would match #14 should NOT return it.
+    all_results = recall_ranked(conn, "aetherOS", project_path=None, limit=20)
+    expired_found = [r for r in all_results if "aetherOS" in r.get("decision", "") and "fork" in r.get("decision", "")]
+    if expired_found:
+        failures.append(
+            f"Q7: TTL expiry: expired aetherOS note was returned "
+            f"(expires_at={expired_found[0].get('expires_at')})"
+        )
+    else:
+        passes.append("Q7: TTL expiry filter")
+        if verbose:
+            print(f"\n  Q7: aetherOS expired note correctly excluded ✓")
+
+    # Assert that no expired rows leak through in a broad query
+    all_rows = recall_ranked(conn, "", project_path=None, limit=50, include_expired=False)
+    now_str = datetime.now(timezone.utc).isoformat()
+    for r in all_rows:
+        if r.get("expires_at") and r["expires_at"] <= now_str:
+            failures.append(
+                f"Q7: TTL filter leak: row id={r['id']} expires_at={r['expires_at']} <= now"
+            )
+            break
+    else:
+        if "Q7: TTL expiry filter" not in passes:
+            passes.append("Q7: TTL expiry filter")
+        if verbose:
+            print(f"  Q7: no expired rows leaked through empty query ✓")
+
+    # ── Query 8: Scope-based recall filtering (C2b) ─────────
+    # Memories have scope column set. When recalling for a project,
+    # only project-scoped (matching) and global-scoped memories should appear.
+    # aw-webapp project recall should NOT include cli-tools-scoped memories.
+    results_aw = recall_ranked(conn, "ADB", project_path="/home/user/aw-webapp", limit=20)
+    adb_in_aw = [r for r in results_aw if "ADB" in r.get("decision", "") and "race" in r.get("decision", "")]
+    if adb_in_aw:
+        failures.append(
+            f"Q8: scope isolation: cli-tools ADB memory leaked into aw-webapp recall"
+        )
+    else:
+        passes.append("Q8: scope isolation")
+        if verbose:
+            print(f"\n  Q8: scope isolation — cli-tools ADB excluded from aw-webapp ✓")
+
+    # Global memories (scope=global) should appear in any project's recall
+    results_cli = recall_ranked(conn, "mode 0600", project_path="/home/user/cli-tools", limit=20)
+    global_in_cli = [r for r in results_cli if "0600" in r.get("decision", "")]
+    if not global_in_cli:
+        failures.append(
+            f"Q8: global scope: global memory missing from cli-tools recall"
+        )
+    else:
+        if "Q8: scope isolation" not in passes:
+            passes.append("Q8: scope isolation")
+        if verbose:
+            print(f"  Q8: global memory surfaced in cli-tools recall ✓")
 
     # ── Summary ─────────────────────────────────────────────
     total = len(passes) + len(failures)
