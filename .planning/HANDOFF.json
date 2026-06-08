@@ -1,27 +1,26 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-08T18:30:00.000Z",
-  "phase": "C0",
-  "phase_name": "relevance-ranking-memory-taxonomy",
+  "timestamp": "2026-06-08T19:45:00.000Z",
+  "phase": "C1",
+  "phase_name": "ranking-integration",
   "phase_dir": ".planning/spikes/SPIKE-C0",
   "plan": 1,
   "task": 1,
   "total_tasks": 1,
-  "status": "paused",
+  "status": "complete",
   "completed_tasks": [
     {"id": "spike-a0", "name": "Daemon skeleton", "status": "done", "commit": "70f63b0"},
     {"id": "spike-b0", "name": "Claude Code integration", "status": "done", "commit": "d13c837"},
     {"id": "spike-b0.1", "name": "Integration hardening", "status": "done", "commit": "fad0334"},
-    {"id": "spike-c0", "name": "Memory taxonomy + FTS5 ranking prototype", "status": "done", "commit": "39eca3e"}
+    {"id": "spike-c0", "name": "Memory taxonomy + FTS5 ranking prototype", "status": "done", "commit": "39eca3e"},
+    {"id": "c1-store-wire", "name": "Wire recall_ranked into store.py recall()", "status": "done", "commit": "bb246c4"},
+    {"id": "c1-session-wire", "name": "Wire ranked results into session_start.py", "status": "done", "commit": "bb246c4"},
+    {"id": "c1-kind-auto", "name": "Add kind auto-detection in remember()", "status": "done", "commit": "bb246c4"},
+    {"id": "c1-trigram", "name": "Add trigram tokenizer to FTS5", "status": "done", "commit": "bb246c4"},
+    {"id": "c1-dedup", "name": "Add deduplication pass in recall", "status": "done", "commit": "bb246c4"},
+    {"id": "c1-tests", "name": "Update A0/B0 smoke tests for ranked recall", "status": "done", "commit": "bb246c4"}
   ],
-  "remaining_tasks": [
-    {"id": "c1-store-wire", "name": "Wire recall_ranked into store.py recall()", "status": "not_started"},
-    {"id": "c1-session-wire", "name": "Wire ranked results into session_start.py", "status": "not_started"},
-    {"id": "c1-kind-auto", "name": "Add kind auto-detection in remember()", "status": "not_started"},
-    {"id": "c1-trigram", "name": "Add trigram tokenizer to FTS5", "status": "not_started"},
-    {"id": "c1-dedup", "name": "Add deduplication pass in recall", "status": "not_started"},
-    {"id": "c1-tests", "name": "Update A0/B0 smoke tests for ranked recall", "status": "not_started"}
-  ],
+  "remaining_tasks": [],
   "blockers": [],
   "human_actions_pending": [],
   "decisions": [
@@ -29,9 +28,13 @@
     {"decision": "recency half-life = 30 days", "rationale": "Balances recent relevance with historical value", "phase": "C0"},
     {"decision": "pinned boost (0.5) > project match (0.4)", "rationale": "User-pinned memories should always surface", "phase": "C0"},
     {"decision": "Taxonomy columns added via ALTER TABLE", "rationale": "Safe migration, preserves existing data", "phase": "C0"},
-    {"decision": "ranking.py is standalone (not integrated)", "rationale": "Spike-sized change; C1 does integration", "phase": "C0"}
+    {"decision": "ranking.py is standalone (not integrated)", "rationale": "Spike-sized change; C1 does integration", "phase": "C0"},
+    {"decision": "FTS5 query escaping via double-quoted terms", "rationale": "Prevents operator injection from dashes, wildcards, etc.", "phase": "C1"},
+    {"decision": "Trigram tokenizer for partial matching", "rationale": "Enables 'test' to match 'pytest' without full-word requirement", "phase": "C1"},
+    {"decision": "Bigram Jaccard dedup (threshold 0.75)", "rationale": "Fast, no dependencies, effective for near-identical text", "phase": "C1"},
+    {"decision": "Category aliases (prefer→preference, etc.)", "rationale": "Common abbreviations in remember() prefix parsing", "phase": "C1"}
   ],
   "uncommitted_files": [],
-  "next_action": "C1: Wire recall_ranked() into store.py recall(), wire ranked results into session_start.py, add kind auto-detection, add trigram tokenizer, update smoke tests. See .planning/spikes/SPIKE-C0/.continue-here.md and docs/claude-code.md.",
-  "context_notes": "C0 spike complete — standalone ranking.py module with FTS5 + taxonomy + ranking. All 6 eval queries pass. Not yet integrated into store.py or session_start.py. Firestick-sideloading Phase 1 plans also exist but are a separate project track."
+  "next_action": "C2: Add per-kind TTL, scope auto-detection, consider embedding-based semantic recall. See docs/claude-code.md.",
+  "context_notes": "C1 complete — ranking integrated into store.py and session_start.py. FTS5 with trigram tokenizer, kind auto-detection, deduplication, and FTS5 query escaping all working. All 21 smoke tests pass. Firestick-sideloading Phase 1 plans also exist but are a separate project track."
 }
