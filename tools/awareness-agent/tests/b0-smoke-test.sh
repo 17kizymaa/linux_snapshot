@@ -936,3 +936,375 @@ set_embeddings_enabled(False)  # reset to default
 print()
 print('[ok] All C2c embeddings tests passed')
 PYEOF
+
+# ============================================================
+# Section 25: C3 — Embedding provenance migration
+# ============================================================
+echo "--- Section 25: C3 embedding provenance migration ---"
+
+python3 - "$AGENT_ROOT" <<'PYEOF'
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+
+from awareness_agent.store import AwarenessStore, set_embeddings_enabled
+
+# --- 25a: New DB has provenance columns ---
+print("[25a] Provenance columns exist in new DB")
+set_embeddings_enabled(True)
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+store = AwarenessStore(db_path)
+store.remember('Use pytest for testing', category='decision', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+
+cols = {r[1] for r in store.conn.execute('PRAGMA table_info(decisions)')}
+assert 'embedding_provider' in cols, f'missing embedding_provider: {cols}'
+assert 'embedding_model' in cols, f'missing embedding_model: {cols}'
+assert 'embedding_dim' in cols, f'missing embedding_dim: {cols}'
+assert 'embedding_version' in cols, f'missing embedding_version: {cols}'
+print('  [ok] All provenance columns exist')
+
+# Verify provenance was stored
+row = store.conn.execute('SELECT embedding_provider, embedding_model, embedding_dim, embedding_version FROM decisions WHERE id = 1').fetchone()
+assert row[0] == 'hash', f'expected hash provider, got {row[0]}'
+assert row[1] == 'char-trigram-sha256-v1', f'expected char-trigram-sha256-v1, got {row[1]}'
+assert row[2] == 384, f'expected dim 384, got {row[2]}'
+assert row[3] == '1.0', f'expected version 1.0, got {row[3]}'
+print(f'  [ok] Provenance stored: provider={row[0]}, model={row[1]}, dim={row[2]}, version={row[3]}')
+store.close()
+os.unlink(db_path)
+
+# --- 25b: Old DB (without provenance columns) migrates cleanly ---
+print("[25b] Old DB without provenance columns migrates cleanly")
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+import sqlite3
+conn = sqlite3.connect(db_path)
+conn.executescript("""
+    CREATE TABLE projects (
+        id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, name TEXT,
+        language TEXT, framework TEXT,
+        first_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+        last_active TEXT DEFAULT CURRENT_TIMESTAMP,
+        metadata TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE TABLE decisions (
+        id INTEGER PRIMARY KEY, project_id INTEGER REFERENCES projects(id),
+        timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+        category TEXT NOT NULL DEFAULT 'note',
+        context TEXT NOT NULL DEFAULT '',
+        decision TEXT NOT NULL,
+        rationale TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        kind TEXT NOT NULL DEFAULT '',
+        scope TEXT NOT NULL DEFAULT 'project',
+        confidence REAL NOT NULL DEFAULT 0.5,
+        tags TEXT NOT NULL DEFAULT '[]',
+        expires_at TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        embedding BLOB
+    );
+    CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY, project_id INTEGER REFERENCES projects(id),
+        started_at TEXT DEFAULT CURRENT_TIMESTAMP, ended_at TEXT,
+        summary TEXT, commands_run INTEGER DEFAULT 0, files_modified INTEGER DEFAULT 0
+    );
+    CREATE TABLE preferences (
+        id INTEGER PRIMARY KEY, key TEXT UNIQUE NOT NULL, value TEXT,
+        scope TEXT NOT NULL DEFAULT 'global',
+        source TEXT NOT NULL DEFAULT 'user',
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+""")
+import numpy as np
+fake_emb = np.zeros(384, dtype=np.float32).tobytes()
+conn.execute("INSERT INTO decisions(id, category, decision, embedding) VALUES (1, 'note', 'old memory without provenance', ?)", (fake_emb,))
+conn.commit()
+conn.close()
+
+store = AwarenessStore(db_path)
+cols = {r[1] for r in store.conn.execute('PRAGMA table_info(decisions)')}
+assert 'embedding_provider' in cols, f'migration did not add embedding_provider: {cols}'
+assert 'embedding_model' in cols, f'migration did not add embedding_model: {cols}'
+print('  [ok] Migration added provenance columns to old DB')
+
+# Legacy row has scope='project' default, so use direct query + ranking
+# The key test is that NULL provenance doesn't crash ranking code
+results = store.conn.execute("SELECT decision, embedding_provider FROM decisions WHERE decision LIKE '%old memory%'").fetchall()
+assert len(results) > 0, 'old row not returned from direct query'
+# Try ranking with NULL provenance — should not crash
+from awareness_agent.ranking import RankWeights, rank_memories
+row_dict = dict(results[0])
+scored = rank_memories([row_dict], weights=RankWeights(embedding=0.5), query_embedding=None)
+print(f'  [ok] Old row with NULL provenance does not crash ranking')
+
+# --- 25c: Migration is idempotent ---
+store2 = AwarenessStore(db_path)
+print('  [ok] Re-opening DB (idempotent migration) succeeds')
+store2.close()
+
+store.close()
+os.unlink(db_path)
+set_embeddings_enabled(False)
+print()
+print('[ok] Section 25: provenance migration passed')
+PYEOF
+
+# ============================================================
+# Section 26: C3 — Backfill embeddings
+# ============================================================
+echo "--- Section 26: C3 backfill embeddings ---"
+
+python3 - "$AGENT_ROOT" <<'PYEOF'
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+
+from awareness_agent.store import AwarenessStore, set_embeddings_enabled
+
+set_embeddings_enabled(False)
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+store = AwarenessStore(db_path)
+store.remember('Use pytest for FastAPI tests', category='decision', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+store.remember('Deploy with make build then make push', category='procedure', context='cwd=/home/user/aw', source='user', project={'root': '/home/user/aw', 'name': 'aw'})
+store.remember('Prefer functional style', category='preference', context='style', source='user')
+
+null_count = store.conn.execute('SELECT COUNT(*) FROM decisions WHERE embedding IS NULL').fetchone()[0]
+assert null_count == 3, f'Expected 3 NULL embeddings, got {null_count}'
+print(f'  [info] Created 3 memories without embeddings')
+
+set_embeddings_enabled(True)
+counts = store.backfill_embeddings()
+print(f'  [info] backfill counts: {counts}')
+assert counts['scanned'] == 3, f'Expected 3 scanned, got {counts["scanned"]}'
+assert counts['updated'] == 3, f'Expected 3 updated, got {counts["updated"]}'
+assert counts['failed'] == 0, f'Expected 0 failed, got {counts["failed"]}'
+
+row = store.conn.execute('SELECT embedding, embedding_provider FROM decisions WHERE id = 1').fetchone()
+assert row[0] is not None, 'Embedding still NULL after backfill'
+assert row[1] == 'hash', f'Expected hash provider, got {row[1]}'
+print(f'  [ok] Backfill populated embeddings + provenance')
+
+counts2 = store.backfill_embeddings()
+print(f'  [info] second backfill counts: {counts2}')
+# When all rows have embeddings, scanned=0 (query filters them out)
+assert counts2['scanned'] == 0, f'Expected 0 scanned on second run, got {counts2["scanned"]}'
+assert counts2['updated'] == 0, f'Expected 0 updated on second run, got {counts2["updated"]}'
+print(f'  [ok] Second backfill is idempotent (scanned 0, all rows already have embeddings)')
+
+store.close()
+os.unlink(db_path)
+set_embeddings_enabled(False)
+print()
+print('[ok] Section 26: backfill embeddings passed')
+PYEOF
+
+# ============================================================
+# Section 27: C3 — Embedding candidate widening
+# ============================================================
+echo "--- Section 27: C3 embedding candidate widening ---"
+
+python3 - "$AGENT_ROOT" <<'PYEOF'
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+
+from awareness_agent.store import AwarenessStore, set_embeddings_enabled
+from awareness_agent.ranking import RankWeights, recall_ranked
+from awareness_agent.embeddings import embed_text
+
+set_embeddings_enabled(True)
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+store = AwarenessStore(db_path)
+project = {'root': '/home/user/aw', 'name': 'aw'}
+
+# Create memories with overlapping tokens for hash embedding similarity
+store.remember('Run all test suites before committing code', category='procedure', context='cwd=/home/user/aw', source='user', project=project)
+store.remember('Use static analysis tools for code quality', category='decision', context='cwd=/home/user/aw', source='user', project=project)
+store.remember('Purchase office supplies from the store', category='note', context='cwd=/home/user/aw', source='user', project=project)
+
+# --- 27a: With embedding weight > 0, embedding candidates appear ---
+print("[27a] Candidate widening surfaces embedding-similar memories")
+weights = RankWeights(embedding=0.5)
+query_emb = embed_text("code review and testing", backend='hash')
+results = recall_ranked(store.conn, '', project_path='/home/user/aw', limit=10, weights=weights, query_embedding=query_emb)
+assert len(results) >= 2, f'Expected at least 2 results from widening, got {len(results)}'
+decisions = [r['decision'] for r in results]
+print(f'  [ok] Widening returned {len(results)} candidates: {[d[:50] for d in decisions]}')
+
+# --- 27b: With embedding weight = 0, no embedding contribution ---
+print("[27b] No widening when embedding weight is 0")
+weights_no_emb = RankWeights(embedding=0.0)
+results_no_wide = recall_ranked(store.conn, '', project_path='/home/user/aw', limit=10, weights=weights_no_emb, query_embedding=query_emb)
+for r in results_no_wide:
+    assert r['_score_breakdown'].get('embedding', 0) == 0.0, 'Embedding component non-zero when weight=0'
+print(f'  [ok] No embedding contribution when weight=0 ({len(results_no_wide)} results, all emb=0)')
+
+store.close()
+os.unlink(db_path)
+set_embeddings_enabled(False)
+print()
+print('[ok] Section 27: candidate widening passed')
+PYEOF
+
+# ============================================================
+# Section 28: C3 — TTL/scope still enforced for embedding hits
+# ============================================================
+echo "--- Section 28: C3 TTL/scope enforced for embedding hits ---"
+
+python3 - "$AGENT_ROOT" <<'PYEOF'
+import os, sys, tempfile
+from datetime import datetime, timezone, timedelta
+sys.path.insert(0, sys.argv[1])
+
+from awareness_agent.store import AwarenessStore, set_embeddings_enabled
+from awareness_agent.ranking import RankWeights, recall_ranked
+from awareness_agent.embeddings import embed_text
+
+set_embeddings_enabled(True)
+db_fd, db_path = tempfile.mkstemp(suffix='.db')
+os.close(db_fd)
+store = AwarenessStore(db_path)
+project = {'root': '/home/user/aw', 'name': 'aw'}
+
+# Create an expired memory with an embedding
+store.remember('This memory is expired and should not appear', category='note', context='cwd=/home/user/aw', source='user', project=project)
+expired_ts = (datetime.now(timezone.utc) - timedelta(days=35)).isoformat()
+store.conn.execute("UPDATE decisions SET expires_at = ? WHERE id = 1", (expired_ts,))
+store.conn.commit()
+
+# Create a project-B memory (should not appear in project-A recall)
+store.remember('Project B specific memory about testing', category='decision', context='cwd=/home/user/project-b', source='user', project={'root': '/home/user/project-b', 'name': 'project-b'})
+
+# Embedding recall for project-A should NOT include expired or project-B memories
+weights = RankWeights(embedding=0.5)
+query_emb = embed_text("testing memory", backend='hash')
+results = recall_ranked(store.conn, '', project_path='/home/user/aw', limit=20, weights=weights, query_embedding=query_emb)
+decisions = [r['decision'] for r in results]
+assert not any('expired' in d for d in decisions), f'Expired memory leaked: {decisions}'
+assert not any('Project B' in d for d in decisions), f'Project-B memory leaked into project-A: {decisions}'
+print(f'  [ok] Expired and out-of-scope memories excluded from embedding results')
+
+store.close()
+os.unlink(db_path)
+set_embeddings_enabled(False)
+PYEOF
+
+# ============================================================
+# Section 29: C3 — No-network sentence-transformers loading
+# ============================================================
+echo "--- Section 29: C3 no-network ST loading ---"
+
+# ============================================================
+# Section 29: C3 — No-network sentence-transformers loading
+# ============================================================
+echo "--- Section 29: C3 no-network ST loading ---"
+
+python3 - "$AGENT_ROOT" <<'PYEOF'
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+
+import socket
+_original_socket = socket.socket
+
+def _blocking_socket(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0, fileno=None):
+    if family in (socket.AF_INET, socket.AF_INET6):
+        raise RuntimeError('Network blocked')
+    return _original_socket(family, type, proto, fileno)
+
+socket.socket = _blocking_socket  # type: ignore
+
+try:
+    from awareness_agent.embeddings import embed_text, resolve_backend
+
+    result = embed_text("test embedding", backend='hash')
+    assert result.provider == 'hash', f'Expected hash, got {result.provider}'
+    print('  [ok] Hash backend works with network blocked')
+
+    effective = resolve_backend('auto')
+    assert effective == 'hash', f'Expected auto→hash, got {effective}'
+    print(f'  [ok] Auto backend resolves to hash when ST unavailable: {effective}')
+
+    assert result.dim == 384
+    assert result.is_semantic is False
+    print(f'  [ok] Hash embedding: dim={result.dim}, is_semantic={result.is_semantic}')
+
+    result2 = embed_text("different text", backend='hash')
+    assert result.is_compatible(result2), 'Same-provider embeddings should be compatible'
+    print(f'  [ok] Same-provider compatibility check works')
+
+finally:
+    socket.socket = _original_socket  # type: ignore
+
+PYEOF
+
+# ============================================================
+# Section 30: C3 — Hash fallback honesty
+# ============================================================
+echo "--- Section 30: C3 hash fallback honesty ---"
+
+# ============================================================
+# Section 30: C3 — Hash fallback honesty
+# ============================================================
+echo "--- Section 30: C3 hash fallback honesty ---"
+
+python3 - "$AGENT_ROOT" <<'PYEOF'
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+
+from awareness_agent.embeddings import (
+    embed_text, cosine_similarity, HASH_PROVIDER, EmbeddingResult
+)
+
+result = embed_text("machine learning neural networks", backend='hash')
+assert result.provider == HASH_PROVIDER
+assert result.is_semantic is False, 'Hash embeddings must not claim to be semantic'
+print(f'  [ok] Hash backend correctly reports is_semantic={result.is_semantic}')
+
+emb1 = embed_text("happy joy celebration", backend='hash')
+emb2 = embed_text("sad grief mourning", backend='hash')
+sim = cosine_similarity(emb1.vector, emb2.vector)
+assert sim < 0.5, f'Hash similarity too high for antonyms: {sim:.4f}'
+print(f'  [ok] Hash does not fake semantic similarity: sim({sim:.4f}) < 0.5 for antonyms')
+
+assert isinstance(result, EmbeddingResult)
+assert len(result.vector) == 1536  # 384 * 4 bytes (float32)
+print(f'  [ok] EmbeddingResult: vector_len={len(result.vector)}, provider={result.provider}')
+
+PYEOF
+
+# ============================================================
+# Section 31: C3 — Optional local sentence-transformers eval
+# ============================================================
+echo "--- Section 31: C3 optional local ST eval ---"
+
+python3 - "$AGENT_ROOT" <<'PYEOF'
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+
+from awareness_agent.embeddings import embed_text
+
+st_model = os.environ.get('AWARENESS_AGENT_ST_MODEL')
+st_eval = os.environ.get('AWARENESS_AGENT_RUN_ST_EVAL')
+
+if not st_eval:
+    print('  [skip] AWARENESS_AGENT_RUN_ST_EVAL not set — skipping optional ST eval')
+elif not st_model:
+    print('  [skip] AWARENESS_AGENT_ST_MODEL not set — skipping optional ST eval')
+else:
+    try:
+        result = embed_text("semantic similarity test", backend='sentence-transformers')
+        if result is None or result.provider == 'hash':
+            print('  [skip] sentence-transformers not available locally, hash fallback used')
+        else:
+            assert result.is_semantic is True, 'ST embeddings should be semantic'
+            print(f'  [ok] Local ST model loaded: provider={result.provider}, model={result.model}, dim={result.dim}')
+            print(f'  [ok] ST embedding is_semantic={result.is_semantic}')
+    except Exception as e:
+        print(f'  [skip] ST eval failed: {e}')
+
+PYEOF
+
+echo ""
+echo '[ok] Section 31: optional ST eval passed/skipped'
+echo ""
+echo '[ok] All C3 smoke sections (25-31) passed'

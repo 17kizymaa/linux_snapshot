@@ -244,3 +244,112 @@ Run eval: `cd tools/awareness-agent && python3 tests/c0-eval.py --verbose`
 3. Consider embedding-based semantic recall for C2
 4. Add `confidence` scoring based on source and age
 5. Add memory export/import for backup and sharing
+
+## Spike C3 Results: Embedding Consolidation — Provenance, Backfill, Hybrid Recall
+
+**Status:** complete
+
+### What changed
+
+| Area | Before (C2c) | After (C3) |
+|------|-------------|-----------|
+| **Provenance** | Embedding BLOB only | BLOB + `embedding_provider`, `embedding_model`, `embedding_dim`, `embedding_version` |
+| **Embedding result** | Raw `bytes` | `EmbeddingResult` dataclass with `vector`, `provider`, `model`, `dim`, `version`, `is_compatible()`, `is_semantic` |
+| **Backend modes** | Implicit | `hash` (always offline), `sentence-transformers` (local model only), `auto` (try ST, fall back to hash) |
+| **ST loading** | Basic try/except | Hardened: `local_files_only=True` for new ST, local path/cache check for old ST, never opens sockets |
+| **Backfill** | None | `store.backfill_embeddings(force, limit)` — idempotent, returns counts, respects TTL, won't overwrite ST vectors with hash |
+| **Candidate search** | Lexical only (FTS5) | `lexical_candidates UNION embedding_candidates → rank` (hybrid recall) |
+| **Weight default** | N/A (embeddings inert) | `embedding` weight `0.0` in `RankWeights` — embeddings affect ranking only when explicitly enabled + weighted |
+| **TTL/scope on embeddings** | N/A | TTL and scope filters applied before embedding candidates are returned |
+| **Hash honesty** | Undocumented | `is_semantic=False` for hash; documented as lexical/offline, not semantic |
+
+### Files modified
+
+```
+awareness_agent/embeddings.py   — EmbeddingResult, hardened ST, resolve_backend(), embed_text()
+awareness_agent/ranking.py      — Provenance migration, candidate widening, provenance-aware scoring
+awareness_agent/store.py        — Backend config, backfill API, provenance storage in remember()
+tests/b0-smoke-test.sh          — Sections 25-31 added (31 total)
+tests/c0-eval.py                — Q13-Q18 added (18 total)
+```
+
+### Embedding provenance
+
+Vectors are only compared when compatible (same provider + model + dim + version). This prevents silently comparing hash vectors against sentence-transformer vectors.
+
+| Backend | Provider | Model | Dim |
+|---------|----------|-------|-----|
+| Hash (default) | `hash` | `char-trigram-sha256-v1` | 384 |
+| Sentence-Transformers | `sentence-transformers` | e.g. `all-MiniLM-L6-v2` | model-dependent |
+
+### Hybrid recall flow
+
+```
+1. Lexical candidates from FTS5 MATCH
+2. Embedding candidates from brute-force numpy cosine (compatible provenance only)
+3. UNION → deduplicate by row id
+4. Final ranking with all active weights
+```
+
+Embedding candidates are only fetched when:
+- Embeddings are enabled (`set_embeddings_enabled(True)`)
+- Embedding weight > 0
+- Query embedding computed successfully
+
+### Hash vs semantic
+
+- **Hash trigram embeddings** (`provider="hash"`): Deterministic, offline, lexical similarity via character trigrams + feature hashing. `is_semantic=False`. Good for fuzzy lexical matching, not true semantic understanding.
+- **Sentence-transformers** (`provider="sentence-transformers"`): True semantic similarity via local model. `is_semantic=True`. Requires a locally cached model (e.g. `all-MiniLM-L6-v2`). No network download ever.
+
+### Backfill API
+
+```python
+store.backfill_embeddings(force=False, limit=None) -> dict
+# Returns: {scanned, updated, skipped_existing, skipped_expired, skipped_incompatible, failed}
+```
+
+- Idempotent: second run skips rows that already have compatible embeddings
+- Respects TTL: expired rows are skipped
+- Quality-aware: won't overwrite sentence-transformer vectors with hash unless `force=True`
+
+### Tests
+
+- **31/31 smoke sections pass** (24 baseline + 7 new C3 sections)
+- **18/18 eval assertions pass** (12 baseline + 6 new C3 assertions)
+- New smoke sections:
+  - S25: Provenance migration (new DB, old DB, idempotency)
+  - S26: Backfill (populate, verify, idempotent re-run)
+  - S27: Candidate widening (weight>0 surfaces vector-similar candidates, weight=0 no contribution)
+  - S28: TTL/scope enforcement (expired + out-of-scope excluded from embedding results)
+  - S29: No-network ST loading (hash works with blocked sockets, auto→hash fallback)
+  - S30: Hash honesty (`is_semantic=False`, low similarity for antonyms)
+  - S31: Optional ST eval (gated by `AWARENESS_AGENT_RUN_ST_EVAL` + `AWARENESS_AGENT_ST_MODEL`)
+
+### Important design decisions
+
+1. **Brute-force numpy for embedding candidates**: No `sqlite-vec`, FAISS, or Chroma dependency. Acceptable because the dataset is small (thousands of memories, not millions). Each candidate scan is O(n) cosine over 384-dim float32 vectors.
+
+2. **Fail-closed embedding**: If embedding computation or loading fails at any point, the system falls back to lexical-only recall. No error propagates to the user.
+
+3. **Provenance gating**: Embedding comparison requires matching provider/model/dim/version. Legacy rows with NULL provenance are silently skipped (no crash, no false match).
+
+4. **Weight-gated widening**: Candidate widening only activates when `embedding` weight > 0. Default `RankWeights.embedding = 0.0` means embeddings are stored but inert unless explicitly configured.
+
+5. **Local-only ST**: Three-tier loading: (a) `local_files_only=True` for new ST, (b) local path check for old ST, (c) HuggingFace cache check. If none succeed, fail closed — no network.
+
+### Known limitations
+
+- **Hash embeddings are not semantic**: Character trigram feature hashing provides fuzzy lexical matching but cannot capture meaning. "happy" and "joyful" will have low hash similarity. Only sentence-transformers provide true semantic recall.
+- **Brute-force scan**: Embedding candidate search is O(n) over all non-expired rows with compatible provenance. Fine for personal-scale memory (thousands of rows), would need vector indexing at scale.
+- **No auto-download**: Sentence-transformers models must be pre-cached locally. The system will never download a model on its own.
+- **No sqlite-vec**: All embedding comparison happens in Python/numpy, not in SQL. This keeps dependencies minimal but means no SQL-level vector indexing.
+- **Scope filtering is coarse**: Embedding candidates filter by scope (`global` always included, `project` matched to current path), but finer scopes (`repo`, `path`, `session`) are not yet used in widening.
+
+### Recommended C4 Next Steps
+
+1. **Config file support**: Move embedding config (enabled, backend, weight, model path) from code-level API calls to the config file (`awareness-agent.json`).
+2. **CLI backfill command**: Expose `backfill_embeddings` as an `awareness reindex` CLI subcommand.
+3. **Embedding cache/warmup**: Pre-compute embeddings for common queries at startup to reduce recall latency.
+4. **Vector indexing**: If the memory store grows large, consider `sqlite-vec` or an in-memory HNSW index for sub-linear candidate search.
+5. **Confidence scoring**: Combine embedding similarity with source/age into a confidence score for each recalled memory.
+6. **Memory export/import**: Add JSON export/import for backup and cross-device sharing.

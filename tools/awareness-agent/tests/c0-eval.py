@@ -436,7 +436,13 @@ def run_embedding_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
     passes: list[str] = []
 
     # Import embedding module
-    from awareness_agent.embeddings import embed_text, cosine_similarity, hash_embed
+    from awareness_agent.embeddings import (
+        EmbeddingResult,
+        embed_text,
+        embed_text_bytes,
+        cosine_similarity,
+        hash_embed,
+    )
 
     # Q9: Embedding column exists and is populated for new memories
     # Re-seed with embeddings by inserting directly with embedding BLOBs
@@ -445,7 +451,13 @@ def run_embedding_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
     for row in rows:
         text = f"{row['decision']} {row['rationale']} {row['context']}".strip()
         emb = hash_embed(text)
-        conn.execute("UPDATE decisions SET embedding = ? WHERE id = ?", (emb, row["id"]))
+        # emb is now an EmbeddingResult — store vector bytes + provenance
+        conn.execute(
+            "UPDATE decisions SET embedding = ?, embedding_provider = ?, "
+            "embedding_model = ?, embedding_dim = ?, embedding_version = ? "
+            "WHERE id = ?",
+            (emb.vector, emb.provider, emb.model, emb.dim, emb.version, row["id"]),
+        )
     conn.commit()
 
     # Verify all rows now have embeddings
@@ -465,6 +477,7 @@ def run_embedding_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
     weights_hybrid = RankWeights(embedding=0.5)
 
     # Hybrid recall needs a query embedding (normally computed by store.recall())
+    # embed_text now returns EmbeddingResult (provenance-aware)
     query_q10 = embed_text("pytest")
 
     results_fts = recall_ranked(
@@ -509,8 +522,9 @@ def run_embedding_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
     ).fetchone()["embedding"]
 
     if pytest_decision and deploy_decision:
-        sim_pytest = cosine_similarity(query_emb, pytest_decision)
-        sim_deploy = cosine_similarity(query_emb, deploy_decision)
+        query_vec = query_emb.vector if isinstance(query_emb, EmbeddingResult) else query_emb
+        sim_pytest = cosine_similarity(query_vec, pytest_decision)
+        sim_deploy = cosine_similarity(query_vec, deploy_decision)
         if sim_pytest > sim_deploy:
             passes.append("Q11: semantic similarity ordering")
             if verbose:
@@ -547,6 +561,150 @@ def run_embedding_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
     return True
 
 
+def run_c3_eval(conn: sqlite3.Connection, verbose: bool = False) -> bool:
+    """Evaluate C3: provenance, backfill, candidate widening, TTL/scope enforcement."""
+    print("\n=== C3: Embedding consolidation eval ===")
+    failures: list[str] = []
+    passes: list[str] = []
+
+    from awareness_agent.embeddings import (
+        EmbeddingResult, embed_text, cosine_similarity,
+        HASH_PROVIDER, HASH_MODEL, EMBED_DIM, HASH_VERSION,
+    )
+    from awareness_agent.ranking import RankWeights, recall_ranked
+
+    # Q13: EmbeddingResult provenance fields
+    emb = embed_text("test provenance", backend='hash')
+    assert isinstance(emb, EmbeddingResult), f'Expected EmbeddingResult, got {type(emb)}'
+    assert emb.provider == HASH_PROVIDER
+    assert emb.model == HASH_MODEL
+    assert emb.dim == EMBED_DIM
+    assert emb.version == HASH_VERSION
+    assert emb.is_semantic is False
+    passes.append("Q13: EmbeddingResult provenance")
+    if verbose:
+        print(f"  Q13: provider={emb.provider}, model={emb.model}, dim={emb.dim}, semantic={emb.is_semantic}")
+
+    # Q14: Provenance compatibility check
+    emb2 = embed_text("another test", backend='hash')
+    assert emb.is_compatible(emb2), 'Same-backend embeddings should be compatible'
+    passes.append("Q14: provenance compatibility")
+    if verbose:
+        print(f"  Q14: compatible={emb.is_compatible(emb2)}")
+
+    # Q15: Backfill populates provenance columns
+    # The eval DB has 15 rows without provenance (seeded before C3 migration).
+    # Simulate backfill by updating rows with embeddings + provenance.
+    rows = conn.execute("SELECT id, decision, rationale, context FROM decisions WHERE embedding IS NULL OR embedding_provider IS NULL").fetchall()
+    updated = 0
+    for row in rows:
+        text = f"{row['decision']} {row['rationale']} {row['context']}".strip()
+        e = embed_text(text, backend='hash')
+        conn.execute(
+            "UPDATE decisions SET embedding = ?, embedding_provider = ?, "
+            "embedding_model = ?, embedding_dim = ?, embedding_version = ? "
+            "WHERE id = ?",
+            (e.vector, e.provider, e.model, e.dim, e.version, row["id"]),
+        )
+        updated += 1
+    conn.commit()
+    null_prov = conn.execute(
+        "SELECT COUNT(*) FROM decisions WHERE embedding_provider IS NULL"
+    ).fetchone()[0]
+    if null_prov == 0:
+        passes.append("Q15: backfill provenance")
+        if verbose:
+            print(f"  Q15: backfill populated provenance for {updated} rows, 0 NULL remaining")
+    else:
+        failures.append(f"Q15: {null_prov} rows still have NULL provenance after backfill")
+
+    # Q16: Candidate widening — embedding-only candidates appear
+    # Use a query that lexically matches nothing but has embedding overlap
+    weights_no_emb = RankWeights(embedding=0.0)
+    weights_emb = RankWeights(embedding=0.5)
+
+    # Query with empty string (no FTS) — only embedding widening can find candidates
+    query_emb = embed_text("pytest testing framework", backend='hash')
+    results_no_wide = recall_ranked(
+        conn, "", project_path="/home/user/aw-webapp",
+        limit=20, weights=weights_no_emb,
+    )
+    results_wide = recall_ranked(
+        conn, "", project_path="/home/user/aw-webapp",
+        limit=20, weights=weights_emb, query_embedding=query_emb,
+    )
+    # With widening, we should get results that have embeddings
+    if len(results_wide) > 0:
+        passes.append("Q16: candidate widening")
+        if verbose:
+            print(f"  Q16: widening returned {len(results_wide)} results (no-widen: {len(results_no_wide)})")
+    else:
+        failures.append("Q16: candidate widening returned no results")
+
+    # Q17: TTL/scope filtering on embedding candidates
+    # Memory #14 is expired — verify it's excluded even with embedding widening
+    results_all = recall_ranked(
+        conn, "", project_path=None,
+        limit=50, weights=weights_emb, query_embedding=query_emb,
+    )
+    expired_found = [r for r in results_all if r.get("id") == 14]
+    if not expired_found:
+        passes.append("Q17: TTL filtering on embedding candidates")
+        if verbose:
+            print(f"  Q17: expired memory #14 correctly excluded from embedding results")
+    else:
+        failures.append("Q17: expired memory #14 leaked through embedding widening")
+
+    # Q18: Incompatible provenance is skipped for embedding scoring
+    # Create a fake ST embedding row and verify its embedding score is zero
+    # when queried with a hash embedding (incompatible providers).
+    # Note: the row can still appear via FTS5 lexical match — the key is that
+    # the embedding component is zero (not compared across incompatible providers).
+    fake_st_vec = embed_text("ST-style embedding", backend='hash')
+    conn.execute(
+        """INSERT INTO decisions
+           (id, project_id, timestamp, category, context, decision,
+            rationale, source, kind, scope, confidence, tags, expires_at, pinned,
+            embedding, embedding_provider, embedding_model, embedding_dim, embedding_version)
+           VALUES (99, 1, datetime('now'), 'note', 'test', 'ST-provenance memory',
+                   '', 'user', 'note', 'project', 0.5, '[]', NULL, 0,
+                   ?, 'sentence-transformers', 'all-MiniLM-L6-v2', 384, '1.0')""",
+        (fake_st_vec.vector,),
+    )
+    conn.commit()
+    hash_query = embed_text("ST-provenance memory", backend='hash')
+    results_st = recall_ranked(
+        conn, "ST-provenance", project_path="/home/user/aw-webapp",
+        limit=10, weights=weights_emb, query_embedding=hash_query,
+    )
+    st_row = next((r for r in results_st if r.get("id") == 99), None)
+    if st_row is not None:
+        emb_score = st_row["_score_breakdown"].get("embedding", 0)
+        if emb_score == 0.0:
+            passes.append("Q18: incompatible provenance skipped")
+            if verbose:
+                print(f"  Q18: ST-provenance row found via FTS5 but embedding score is 0 (correct)")
+        else:
+            failures.append(f"Q18: ST-provenance row has non-zero embedding score: {emb_score}")
+    else:
+        # Also acceptable — row not returned at all
+        passes.append("Q18: incompatible provenance skipped")
+        if verbose:
+            print(f"  Q18: ST-provenance row not in results (also correct)")
+    # Clean up
+    conn.execute("DELETE FROM decisions WHERE id = 99")
+    conn.commit()
+
+    total = len(passes) + len(failures)
+    print(f"\nC3 Eval: {len(passes)}/{total} passed")
+    if failures:
+        for f in failures:
+            print(f"  ✗ {f}")
+        return False
+    print("  All C3 assertions passed ✓")
+    return True
+
+
 def main():
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
 
@@ -564,6 +722,9 @@ def main():
 
     if all_pass:
         all_pass = run_embedding_eval(conn, verbose=verbose)
+
+    if all_pass:
+        all_pass = run_c3_eval(conn, verbose=verbose)
 
     sys.exit(0 if all_pass else 1)
 

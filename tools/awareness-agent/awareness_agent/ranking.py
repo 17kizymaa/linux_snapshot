@@ -5,7 +5,9 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
+
+from .embeddings import EmbeddingResult
 
 # ---------------------------------------------------------------------------
 # Memory taxonomy
@@ -235,7 +237,7 @@ def rank_memories(
     *,
     current_project_path: str | None = None,
     weights: RankWeights | None = None,
-    query_embedding: bytes | None = None,
+    query_embedding: EmbeddingResult | bytes | None = None,
 ) -> list[dict[str, Any]]:
     """Rank a list of memory rows with score breakdown.
 
@@ -299,24 +301,44 @@ def rank_memories(
         else:
             breakdown["source"] = 0.0
 
-        # 7) Embedding cosine similarity (C2c)
+        # 7) Embedding cosine similarity (C2c/C3)
+        breakdown["embedding"] = 0.0
         if (
             query_embedding is not None
             and weights.embedding > 0
             and "embedding" in row
             and row["embedding"] is not None
         ):
+            # C3: provenance compatibility check
+            row_provider = row.get("embedding_provider")
+            row_model = row.get("embedding_model")
+            row_dim = row.get("embedding_dim")
+            query_provider = query_embedding.provider if isinstance(query_embedding, EmbeddingResult) else None
+            query_model = query_embedding.model if isinstance(query_embedding, EmbeddingResult) else None
+            query_dim = query_embedding.dim if isinstance(query_embedding, EmbeddingResult) else None
+
+            # Skip if provenance is known and incompatible
+            if query_provider is not None and row_provider is not None:
+                if (query_provider != row_provider
+                        or query_model != row_model
+                        or query_dim != row_dim):
+                    breakdown["embedding"] = 0.0
+                    total = sum(breakdown.values())
+                    scored.append({**row, "_score": round(total, 4), "_score_breakdown": breakdown})
+                    continue
+
             try:
+                vec_bytes = query_embedding.vector if isinstance(query_embedding, EmbeddingResult) else query_embedding
                 from .embeddings import cosine_similarity
-                sim = cosine_similarity(query_embedding, row["embedding"])
-                if sim >= weights.embedding_threshold:
+                sim = cosine_similarity(vec_bytes, row["embedding"])
+                if math.isnan(sim) or math.isinf(sim):
+                    breakdown["embedding"] = 0.0
+                elif sim >= weights.embedding_threshold:
                     breakdown["embedding"] = weights.embedding * sim
                 else:
                     breakdown["embedding"] = 0.0
             except Exception:
                 breakdown["embedding"] = 0.0
-        else:
-            breakdown["embedding"] = 0.0
 
         total = sum(breakdown.values())
         scored.append({**row, "_score": round(total, 4), "_score_breakdown": breakdown})
@@ -377,9 +399,16 @@ CREATE INDEX IF NOT EXISTS idx_decisions_pinned ON decisions(pinned);
 CREATE INDEX IF NOT EXISTS idx_decisions_expires ON decisions(expires_at);
 """
 
-# Schema addition for embeddings (C2c)
+# Schema additions for embeddings (C2c + C3)
 EMBEDDING_SCHEMA = """
 ALTER TABLE decisions ADD COLUMN embedding BLOB;
+"""
+
+EMBEDDING_PROVENANCE_SCHEMA = """
+ALTER TABLE decisions ADD COLUMN embedding_provider TEXT;
+ALTER TABLE decisions ADD COLUMN embedding_model TEXT;
+ALTER TABLE decisions ADD COLUMN embedding_dim INTEGER;
+ALTER TABLE decisions ADD COLUMN embedding_version TEXT;
 """
 
 EMBEDDING_INDEX = """
@@ -404,6 +433,15 @@ def migrate_taxonomy(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE decisions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
     if "embedding" not in existing:
         conn.execute("ALTER TABLE decisions ADD COLUMN embedding BLOB")
+    # C3: embedding provenance columns
+    if "embedding_provider" not in existing:
+        conn.execute("ALTER TABLE decisions ADD COLUMN embedding_provider TEXT")
+    if "embedding_model" not in existing:
+        conn.execute("ALTER TABLE decisions ADD COLUMN embedding_model TEXT")
+    if "embedding_dim" not in existing:
+        conn.execute("ALTER TABLE decisions ADD COLUMN embedding_dim INTEGER")
+    if "embedding_version" not in existing:
+        conn.execute("ALTER TABLE decisions ADD COLUMN embedding_version TEXT")
     # Create indexes
     conn.executescript(TAXONOMY_INDEXES)
     conn.executescript(EMBEDDING_INDEX)
@@ -480,6 +518,69 @@ def _escape_fts5_query(query: str) -> str:
     return escaped
 
 
+def _embedding_widening_candidates(
+    conn: sqlite3.Connection,
+    *,
+    query_embedding: EmbeddingResult,
+    project_path: str | None,
+    scope_filter: str,
+    scope_params: tuple,
+    limit: int,
+    include_expired: bool,
+) -> list[sqlite3.Row]:
+    """Fetch embedding-only candidates via brute-force cosine similarity.
+
+    This is the C3 semantic candidate widening step: find memories whose
+    embeddings are similar to the query embedding, even if they share no
+    lexical overlap with the query text.
+
+    Returns rows that pass TTL/scope filters and have compatible provenance.
+    """
+    # Fetch all non-expired rows with embeddings and provenance
+    if not include_expired:
+        expire_filter = "(d.expires_at IS NULL OR d.expires_at > datetime('now'))"
+    else:
+        expire_filter = "1=1"
+
+    # We need rows with embeddings AND compatible provenance.
+    # Compatible = same provider + model + dim, OR NULL provenance (legacy rows).
+    q_provider = query_embedding.provider
+    q_model = query_embedding.model
+    q_dim = query_embedding.dim
+
+    rows = conn.execute(
+        f"""
+        SELECT d.id, d.timestamp, d.category, d.context, d.decision,
+               d.rationale, d.source, d.kind, d.scope, d.confidence,
+               d.tags, d.expires_at, d.pinned,
+               d.embedding,
+               d.embedding_provider, d.embedding_model, d.embedding_dim,
+               p.name AS project_name, p.path AS project_path,
+               NULL AS _fts_rank
+        FROM decisions d
+        LEFT JOIN projects p ON p.id = d.project_id
+        WHERE d.embedding IS NOT NULL
+          AND {expire_filter}
+          AND {scope_filter}
+          AND (
+              d.embedding_provider IS NULL
+              OR (d.embedding_provider = ?
+                    AND d.embedding_model = ?
+                    AND d.embedding_dim = ?)
+          )
+        LIMIT ?
+        """,
+        (*scope_params, q_provider, q_model, q_dim, max(limit * 10, 200)),
+    ).fetchall()
+
+    # Post-filter expired (belt-and-suspenders)
+    if not include_expired:
+        now_str = datetime.now(timezone.utc).isoformat()
+        rows = [r for r in rows if not r["expires_at"] or r["expires_at"] > now_str]
+
+    return rows
+
+
 def recall_ranked(
     conn: sqlite3.Connection,
     query: str = "",
@@ -488,24 +589,34 @@ def recall_ranked(
     limit: int = 10,
     weights: RankWeights | None = None,
     include_expired: bool = False,
-    query_embedding: bytes | None = None,
+    query_embedding: EmbeddingResult | bytes | None = None,
 ) -> list[dict[str, Any]]:
     """Ranked recall using FTS5 + heuristic scoring (+ optional embeddings).
 
     If query is empty, falls back to recency + metadata scoring (no FTS).
     If query_embedding is provided and weights.embedding > 0, cosine similarity
     is blended into the score (hybrid recall).
+
+    C3: When embeddings are enabled and weighted, performs candidate widening:
+    lexical candidates UNION embedding candidates → final ranking.
     """
     if weights is None:
         weights = RankWeights()
 
     limit = max(1, min(int(limit), 100))
 
+    # Normalize query_embedding: if it's legacy bytes, wrap it
+    if isinstance(query_embedding, bytes):
+        from .embeddings import HASH_PROVIDER, HASH_MODEL, HASH_VERSION, EMBED_DIM
+        query_embedding = EmbeddingResult(
+            vector=query_embedding,
+            provider=HASH_PROVIDER,
+            model=HASH_MODEL,
+            dim=EMBED_DIM,
+            version=HASH_VERSION,
+        )
+
     # Build project-scoped filtering SQL fragment.
-    # scope=NULL or scope='global' always passes.
-    # scope='project' passes only when project_path matches that memory's project.
-    # When no project_path is set, scope='project' memories are excluded
-    # (they belong to a specific project, not the global context).
     if project_path:
         scope_filter = (
             "(d.scope IS NULL OR d.scope = 'global' "
@@ -517,19 +628,31 @@ def recall_ranked(
         scope_params = ()
 
     embedding_select = ", d.embedding AS embedding"
+    prov_select = (
+        ", d.embedding_provider, d.embedding_model, d.embedding_dim"
+    )
+
+    # Determine if we should do embedding candidate widening
+    do_embedding_widening = (
+        query_embedding is not None
+        and weights.embedding > 0
+        and isinstance(query_embedding, EmbeddingResult)
+    )
+
+    lexical_rows: list[sqlite3.Row] = []
 
     if query.strip():
         fts_query = _escape_fts5_query(query)
         if not fts_query:
             return []
         # FTS5 search: join decisions with fts table for BM25 rank
-        rows = conn.execute(
+        lexical_rows = conn.execute(
             f"""
             SELECT d.id, d.timestamp, d.category, d.context, d.decision,
                    d.rationale, d.source, d.kind, d.scope, d.confidence,
                    d.tags, d.expires_at, d.pinned,
                    p.name AS project_name, p.path AS project_path,
-                   fts.rank AS _fts_rank{embedding_select}
+                   fts.rank AS _fts_rank{embedding_select}{prov_select}
             FROM decisions_fts fts
             JOIN decisions d ON d.id = fts.rowid
             LEFT JOIN projects p ON p.id = d.project_id
@@ -538,7 +661,7 @@ def recall_ranked(
             ORDER BY fts.rank
             LIMIT ?
             """,
-            (fts_query, *scope_params, limit * 3),  # over-fetch for post-ranking
+            (fts_query, *scope_params, limit * 3),
         ).fetchall()
     else:
         # No query: return recent decisions, scored by metadata only
@@ -547,15 +670,13 @@ def recall_ranked(
         else:
             expire_filter = "1=1"
 
-        # Embedding-only recall: if we have a query_embedding but no text query,
-        # fetch all non-expired rows (with embeddings) for brute-force scoring
-        rows = conn.execute(
+        lexical_rows = conn.execute(
             f"""
             SELECT d.id, d.timestamp, d.category, d.context, d.decision,
                    d.rationale, d.source, d.kind, d.scope, d.confidence,
                    d.tags, d.expires_at, d.pinned,
                    p.name AS project_name, p.path AS project_path,
-                   NULL AS _fts_rank{embedding_select}
+                   NULL AS _fts_rank{embedding_select}{prov_select}
             FROM decisions d
             LEFT JOIN projects p ON p.id = d.project_id
             WHERE {expire_filter}
@@ -566,20 +687,39 @@ def recall_ranked(
             (*scope_params, limit * 3),
         ).fetchall()
 
-    # Filter expired
+    # Filter expired from lexical rows
     if not include_expired:
         now_str = datetime.now(timezone.utc).isoformat()
-        rows = [
-            r for r in rows
+        lexical_rows = [
+            r for r in lexical_rows
             if not r["expires_at"] or r["expires_at"] > now_str
         ]
 
-    # Convert to dicts
-    result = [dict(r) for r in rows]
+    # C3: Semantic candidate widening
+    embedding_rows: list[sqlite3.Row] = []
+    if do_embedding_widening:
+        embedding_rows = _embedding_widening_candidates(
+            conn,
+            query_embedding=query_embedding,  # type: ignore[arg-type]
+            project_path=project_path,
+            scope_filter=scope_filter,
+            scope_params=scope_params,
+            limit=limit,
+            include_expired=include_expired,
+        )
+
+    # Merge: lexical UNION embedding, deduplicated by id
+    seen_ids: set[int] = set()
+    merged: list[dict[str, Any]] = []
+    for r in list(lexical_rows) + list(embedding_rows):
+        rid = r["id"]
+        if rid not in seen_ids:
+            seen_ids.add(rid)
+            merged.append(dict(r))
 
     # Apply ranking (with optional embedding scoring)
     ranked = rank_memories(
-        result,
+        merged,
         current_project_path=project_path,
         weights=weights,
         query_embedding=query_embedding,

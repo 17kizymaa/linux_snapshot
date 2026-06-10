@@ -22,6 +22,9 @@ from .redaction import redact_text
 # Global config: embeddings enabled flag (default off to keep baseline green)
 _EMBEDDINGS_ENABLED = False
 
+# Global config: embedding backend mode (default: hash)
+_EMBEDDING_BACKEND = "hash"
+
 
 def set_embeddings_enabled(enabled: bool) -> None:
     """Enable or disable embedding computation at remember() time.
@@ -37,6 +40,22 @@ def set_embeddings_enabled(enabled: bool) -> None:
 def embeddings_enabled() -> bool:
     """Return whether embeddings are currently enabled."""
     return _EMBEDDINGS_ENABLED
+
+
+def set_embedding_backend(backend: str) -> None:
+    """Set the embedding backend mode.
+
+    Args:
+        backend: One of 'hash', 'sentence-transformers', 'auto'.
+    """
+    global _EMBEDDING_BACKEND
+    _EMBEDDING_BACKEND = backend
+
+
+def embedding_backend() -> str:
+    """Return the current embedding backend mode."""
+    return _EMBEDDING_BACKEND
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -202,21 +221,21 @@ class AwarenessStore:
         )
 
         # Compute embedding if enabled
-        embedding: bytes | None = None
+        embedding_result = None
         if _EMBEDDINGS_ENABLED:
             try:
                 from .embeddings import embed_text
                 embedding_text = f"{decision} {redact_text(rationale)} {redact_text(context)}".strip()
-                embedding = embed_text(embedding_text)
+                embedding_result = embed_text(embedding_text, backend=_EMBEDDING_BACKEND)
             except Exception:
-                embedding = None  # fail-closed: no embedding, no error
+                embedding_result = None  # fail-closed: no embedding, no error
 
         with self.conn:
-            if embedding is not None:
+            if embedding_result is not None:
                 cur = self.conn.execute(
                     """
-                    INSERT INTO decisions(project_id, category, context, decision, rationale, source, kind, expires_at, scope, embedding)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO decisions(project_id, category, context, decision, rationale, source, kind, expires_at, scope, embedding, embedding_provider, embedding_model, embedding_dim, embedding_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id,
@@ -228,7 +247,11 @@ class AwarenessStore:
                         kind,
                         expires_at,
                         scope,
-                        embedding,
+                        embedding_result.vector,
+                        embedding_result.provider,
+                        embedding_result.model,
+                        embedding_result.dim,
+                        embedding_result.version,
                     ),
                 )
             else:
@@ -266,17 +289,18 @@ class AwarenessStore:
         Results include '_score' and '_score_breakdown' when ranked.
 
         If embeddings are enabled (set_embeddings_enabled(True)), a query
-        embedding is computed and passed to recall_ranked for hybrid scoring.
+        embedding is computed and passed to recall_ranked for hybrid scoring
+        with candidate widening.
         """
         if project_path is ...:
             project_path = self._current_project_path()
 
         # Compute query embedding if enabled and query is non-empty
-        query_embedding: bytes | None = None
+        query_embedding = None
         if _EMBEDDINGS_ENABLED and query.strip():
             try:
                 from .embeddings import embed_text
-                query_embedding = embed_text(query)
+                query_embedding = embed_text(query, backend=_EMBEDDING_BACKEND)
             except Exception:
                 query_embedding = None  # fail-closed
 
@@ -288,6 +312,121 @@ class AwarenessStore:
             weights=weights,
             query_embedding=query_embedding,
         )
+
+    def backfill_embeddings(
+        self,
+        *,
+        force: bool = False,
+        limit: int | None = None,
+    ) -> dict[str, int]:
+        """Compute and store embeddings for existing memories that lack them.
+
+        Args:
+            force: If True, recompute embeddings even if already present.
+            limit: Maximum number of rows to process. None = all.
+
+        Returns:
+            Dict with counts: scanned, updated, skipped_existing,
+            skipped_expired, skipped_incompatible, failed.
+        """
+        from .embeddings import embed_text, HASH_PROVIDER
+
+        now_str = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat()
+
+        # Find rows needing embeddings
+        if force:
+            where = "WHERE 1=1"
+        else:
+            where = "WHERE embedding IS NULL OR embedding_provider IS NULL"
+
+        # Exclude expired rows
+        where += " AND (expires_at IS NULL OR expires_at > ?)"
+
+        # Get the current backend's provenance so we don't overwrite
+        # higher-quality vectors with lower-quality ones
+        current_backend = _EMBEDDING_BACKEND
+        try:
+            from .embeddings import resolve_backend
+            effective_backend = resolve_backend(current_backend)
+        except Exception:
+            effective_backend = "hash"
+
+        # Determine what provider the current backend produces
+        if effective_backend == "sentence-transformers":
+            # We'd be producing sentence-transformers vectors — don't overwrite
+            # existing sentence-transformers vectors with hash
+            skip_if_provider = HASH_PROVIDER
+        else:
+            # We're producing hash vectors — don't overwrite any existing
+            # sentence-transformers vectors (higher quality)
+            skip_if_provider = "sentence-transformers"
+
+        query = f"SELECT id, decision, rationale, context, embedding_provider FROM decisions {where} ORDER BY id"
+        params: list = [now_str]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+
+        counts = {
+            "scanned": 0,
+            "updated": 0,
+            "skipped_existing": 0,
+            "skipped_expired": 0,
+            "skipped_incompatible": 0,
+            "failed": 0,
+        }
+
+        for row in rows:
+            counts["scanned"] += 1
+            rid = row["id"]
+            existing_provider = row["embedding_provider"]
+
+            # Skip if already has a compatible embedding (not forcing)
+            if not force and existing_provider is not None:
+                counts["skipped_existing"] += 1
+                continue
+
+            # Skip if existing provider is higher quality than what we'd produce
+            if (force and existing_provider is not None
+                    and existing_provider == "sentence-transformers"
+                    and skip_if_provider == "sentence-transformers"):
+                # Don't overwrite ST vectors with hash
+                counts["skipped_incompatible"] += 1
+                continue
+
+            try:
+                text = f"{row['decision']} {row['rationale']} {row['context']}".strip()
+                emb = embed_text(text, backend=current_backend)
+                self.conn.execute(
+                    """
+                    UPDATE decisions
+                    SET embedding = ?,
+                        embedding_provider = ?,
+                        embedding_model = ?,
+                        embedding_dim = ?,
+                        embedding_version = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        emb.vector,
+                        emb.provider,
+                        emb.model,
+                        emb.dim,
+                        emb.version,
+                        rid,
+                    ),
+                )
+                counts["updated"] += 1
+            except Exception:
+                counts["failed"] += 1
+
+        self.conn.commit()
+        self._secure_files()
+        return counts
 
     def sweep(self) -> int:
         """Hard-delete expired rows. Returns the number of rows removed.
