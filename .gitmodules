@@ -7,3 +7,6 @@
 [submodule "wyld-application-v2/WYLD_APPLICATION_GSD-v2"]
 	path = wyld-application-v2/WYLD_APPLICATION_GSD-v2
 	url = git@github.com:17kizymaa/WYLD_APPLICATION_GSD-v2.git
+[submodule "last30days-skill"]
+	path = last30days-skill
+	url = https://github.com/mvanhorn/last30days-skill.git
