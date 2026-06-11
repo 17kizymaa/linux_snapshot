@@ -1,0 +1,18 @@
+{
+  "project": "chester-june-shopping-list",
+  "model": "open_router/poolside/laguna-m.1:free",
+  "workflow": "git-first",
+  "testing": "pytest",
+  "commit_style": "small logical commits with clear messages",
+  "budget_default": {
+    "staples": 50,
+    "brook_street": 20
+  },
+  "bag_strategy": {
+    "backpack": "dense/heavy items close to spine",
+    "cold_bag": "meat, frozen veg, dairy, Brook Street chilled",
+    "tote_1": "vegetables, cabbage, mushrooms, bread",
+    "tote_2": "Brook Street treats only",
+    "fragile_layer": "eggs, herbs, plantain, fresh chillies, soft cheese"
+  }
+}
