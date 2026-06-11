@@ -1,0 +1,20 @@
+weekly_modes:
+  lean_week:
+    staples: 30
+    brook_street: 10
+    use_when: "Freezer already full"
+
+  default_week:
+    staples: 50
+    brook_street: 20
+    use_when: "Normal Monday"
+
+  freezer_build_week:
+    staples: 65
+    brook_street: 24
+    use_when: "Meat/stock rebuild"
+
+  celebration_dad_week:
+    staples: 75
+    brook_street: 35
+    use_when: "Bigos, pierogi, treat board"

@@ -1,0 +1,37 @@
+recipe:
+  name: "Pierogi ruskie"
+  servings: 4
+  prep_time: 45
+  cook_time: 30
+  total_cost_gbp: 7.00
+
+ingredients:
+  - item_id: potatoes_white
+    quantity: 500
+    unit: g
+    purpose: "filling base"
+  - item_id: tworog_polish
+    quantity: 250
+    unit: g
+    purpose: "filling"
+  - item_id: onions_white
+    quantity: 1
+    unit: pieces
+    purpose: "filling/frying"
+  - item_id: flour_plain
+    quantity: 500
+    unit: g
+    purpose: "dough"
+  - item_id: eggs_large
+    quantity: 1
+    unit: pieces
+    purpose: "dough binder"
+
+freezer_suitable: true
+freezer_notes: "Freeze uncooked on tray, then bag portions of 8-12. Boil from frozen, then pan-fry."
+dad_delight: "very high"
+skill_tags:
+  - dough_handling
+  - filling_texture
+  - sealing_technique
+  - batch_freezing

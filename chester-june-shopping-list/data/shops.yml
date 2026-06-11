@@ -1,0 +1,24 @@
+shops:
+  - id: discount_primary
+    name: "Primary discount staple shop"
+    role: "staples_freezer_fill"
+    price_tier: "low"
+    notes: "Use for heavy basics before Brook Street. Check Google Maps for: Aldi Chester CH1, Lidl Chester CH1, Iceland Chester"
+
+  - id: brook_polish
+    name: "Brook Street Polish/Eastern European shop"
+    role: "polish_specialty"
+    price_tier: "specialty"
+    notes: "Twaróg, kiełbasa, sauerkraut, ogórki, żurek starter"
+
+  - id: brook_african_caribbean
+    name: "Brook Street African/Caribbean shop"
+    role: "crossover_specialty"
+    price_tier: "specialty"
+    notes: "Plantain, scotch bonnet, seasonings, saltfish"
+
+  - id: brook_asian
+    name: "Brook Street Asian shop"
+    role: "broth_specialty"
+    price_tier: "specialty"
+    notes: "Soy, miso, noodles, dried mushrooms, chilli oils"

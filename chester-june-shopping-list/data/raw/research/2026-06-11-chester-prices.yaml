@@ -1,0 +1,41 @@
+# Chester Grocery Research Data
+# Generated: 2026-06-11
+# Confidence: low (social search limitations noted)
+
+limitations:
+  - tool_not_suitable: "last30days searches social media discussions, not business directories"
+  - no_location_data: "Store addresses and opening hours not available via this method"
+  - no_pricing_data: "Real-time grocery prices not available via this method"
+  - recommendation: "Use Google Maps and store websites for accurate information"
+
+budget_staple_shops:
+  status: "not_found_in_search_window"
+  searched:
+    - "Aldi Lidl Iceland Farmfoods Home Bargains B&M Chester"
+    - "budget supermarkets Brook Street Chester walking distance"
+  recommendation: "Check Google Maps for: Aldi Chester CH1, Lidl Chester CH1, Iceland Chester"
+
+brook_street_independents:
+  status: "not_found_in_search_window"
+  searched:
+    - "Chester UK Polish shop"
+    - "African Caribbean grocery Chester"
+    - "Asian oriental shop Chester"
+  recommendation: "Walk Brook Street and nearby streets (Foregate Street, Eastgate Street)"
+
+ingredient_availability:
+  status: "not_found"
+  items_queried:
+    - "twaróg quark"
+    - "kiełbasa smoked sausage"
+    - "sauerkraut ogórki kiszone"
+    - "żurek starter"
+    - "dried mushrooms marjoram dill"
+  recommendation: "Check large Tesco/Asda for Polish section, or specialist shops in Liverpool/Manchester"
+
+source_coverage:
+  date_range: "2026-05-12 to 2026-06-11"
+  platforms_searched:
+    - Reddit: "No relevant Chester grocery discussions found"
+    - YouTube: "General UK grocery content, no Chester-specific"
+    - Hacker News: "No relevant grocery content"

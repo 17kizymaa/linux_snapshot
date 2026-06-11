@@ -1,0 +1,44 @@
+recipe:
+  name: "Bigos"
+  servings: 6
+  prep_time: 30
+  cook_time: 180
+  total_cost_gbp: 15.00
+
+ingredients:
+  - item_id: cabbage_white
+    quantity: 1
+    unit: head
+    purpose: "base"
+  - item_id: sauerkraut
+    quantity: 500
+    unit: g
+    purpose: "sour base"
+  - item_id: pork_shoulder
+    quantity: 500
+    unit: g
+    purpose: "protein"
+  - item_id: kielbasa
+    quantity: 300
+    unit: g
+    purpose: "smoke flavour"
+  - item_id: onions_white
+    quantity: 2
+    unit: pieces
+    purpose: "base"
+  - item_id: mushrooms_mixed
+    quantity: 300
+    unit: g
+    purpose: "umami"
+  - item_id: dried_mushrooms
+    quantity: 10
+    unit: g
+    purpose: "deep flavour"
+
+freezer_suitable: true
+freezer_notes: "Cool in shallow containers, freeze 1-2 portion tubs. Improves after reheating."
+dad_delight: "extremely high"
+skill_tags:
+  - slow_cooking
+  - flavour_balancing
+  - batch_cooking
