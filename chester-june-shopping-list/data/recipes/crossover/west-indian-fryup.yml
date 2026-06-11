@@ -1,0 +1,31 @@
+recipe:
+  name: "West Indian Fry-up"
+  servings: 2
+  prep_time: 15
+  cook_time: 20
+  total_cost_gbp: 8.00
+
+ingredients:
+  - item_id: plantain
+    quantity: 2
+    unit: pieces
+    purpose: "base"
+  - item_id: onions_white
+    quantity: 1
+    unit: pieces
+    purpose: "base"
+  - item_id: scotch_bonnet
+    quantity: 1
+    unit: pieces
+    purpose: "heat"
+  - item_id: eggs_large
+    quantity: 4
+    unit: pieces
+    purpose: "protein"
+
+freezer_suitable: false
+freezer_notes: "Best fresh"
+dad_delight: "high"
+skill_tags:
+  - plantain_frying
+  - spice_balance

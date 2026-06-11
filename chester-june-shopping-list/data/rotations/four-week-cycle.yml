@@ -1,0 +1,20 @@
+rotation:
+  week_1:
+    hero: "Pierogi ruskie"
+    brook_focus: "twarog, ogorki"
+    crossover: "Asian broth bowl"
+  
+  week_2:
+    hero: "Bigos"
+    brook_focus: "sauerkraut, kielbasa, dried mushrooms"
+    crossover: "Plantain fry-up"
+  
+  week_3:
+    hero: "Zurek"
+    brook_focus: "zurek starter, sausage, marjoram"
+    crossover: "Zapiekanka"
+  
+  week_4:
+    hero: "Gołąbki"
+    brook_focus: "Polish spices, pickles"
+    crossover: "Broth/rice bowls"
