@@ -44,12 +44,11 @@ Downloads/
 # === Desktop (usually shortcuts/junk) ===
 Desktop/
 
-# === wyld-application-v2: track audio + symlink despite global rules ===
+# === wyld-application-v2: keep dir visible, but let global audio/video ignores apply ===
+# (Voice recordings and large video belong inside the submodule with its own .gitignore,
+# not committed here. The four file-pattern un-ignores that used to live below this
+# comment were closed 2026-06-11 after they caused leaks scrubbed in 99efe83/704dcbf.)
 !wyld-application-v2/
-!wyld-application-v2/**/*.m4a
-!wyld-application-v2/**/*.mp3
-!wyld-application-v2/**/*.mp4
-!wyld-application-v2/**/*.wav
 
 # === Symlinks to system libs ===
 libwebp.so.*
