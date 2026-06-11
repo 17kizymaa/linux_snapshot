@@ -256,6 +256,73 @@ fi
 echo "[ok] real user .claude not mutated"
 
 # ============================================================
+# Section 10: C4 runtime config loading
+# ============================================================
+echo "=== Section 10: C4 runtime config loading ==="
+
+cat > "$XDG_CONFIG_HOME/awareness-agent/config.toml" <<'TOML'
+[embedding]
+enabled = false
+backend = "hash"
+model = "all-MiniLM-L6-v2"
+
+[ranking.weights]
+embedding = 0.25
+embedding_threshold = 0.4
+TOML
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PYCONFIG'
+from awareness_agent.config import build_rank_weights, load_runtime_config
+
+config = load_runtime_config()
+weights = build_rank_weights(config)
+assert weights.embedding == 0.25, weights
+assert weights.embedding_threshold == 0.4, weights
+PYCONFIG
+
+echo "[ok] runtime config loading works"
+
+# ============================================================
+# Section 11: C4 MCP façade
+# ============================================================
+echo "=== Section 11: C4 MCP façade ==="
+
+PYTHONPATH="$AGENT_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PYMCP'
+import json
+import os
+import subprocess
+
+messages = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "awareness.health", "arguments": {}}},
+]
+
+proc = subprocess.Popen(
+    ["awareness", "mcp"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+for message in messages:
+    proc.stdin.write(json.dumps(message) + "\n")
+    proc.stdin.flush()
+
+responses = [json.loads(proc.stdout.readline()) for _ in messages]
+proc.terminate()
+stderr = proc.stderr.read()
+
+assert responses[0]["result"]["serverInfo"]["name"] == "awareness-agent", responses
+assert any(tool["name"] == "awareness.memory.recall" for tool in responses[1]["result"]["tools"]), responses
+health = json.loads(responses[2]["result"]["content"][0]["text"])
+assert health["ok"] is True, responses
+assert "Traceback" not in stderr, stderr
+PYMCP
+
+echo "[ok] MCP façade discovery and invocation works"
+
+# ============================================================
 echo ""
 echo "[ok] awareness-agent spike B0 smoke test passed"
 

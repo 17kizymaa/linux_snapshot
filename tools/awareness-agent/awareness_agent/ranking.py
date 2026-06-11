@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import sqlite3
 from dataclasses import dataclass, field
@@ -81,6 +82,18 @@ class RankWeights:
     # Embedding hybrid scoring (C2c)
     embedding: float = 0.0        # Weight for cosine similarity (0 = embeddings disabled)
     embedding_threshold: float = 0.3  # Minimum cosine sim to include embedding boost
+
+
+_DEFAULT_RANK_WEIGHTS = RankWeights()
+
+
+def set_default_rank_weights(weights: RankWeights) -> None:
+    global _DEFAULT_RANK_WEIGHTS
+    _DEFAULT_RANK_WEIGHTS = copy.deepcopy(weights)
+
+
+def default_rank_weights() -> RankWeights:
+    return copy.deepcopy(_DEFAULT_RANK_WEIGHTS)
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +262,7 @@ def rank_memories(
     boost component.
     """
     if weights is None:
-        weights = RankWeights()
+        weights = default_rank_weights()
 
     scored = []
     for row in rows:
@@ -601,7 +614,7 @@ def recall_ranked(
     lexical candidates UNION embedding candidates → final ranking.
     """
     if weights is None:
-        weights = RankWeights()
+        weights = default_rank_weights()
 
     limit = max(1, min(int(limit), 100))
 

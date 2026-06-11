@@ -33,6 +33,10 @@ def config_dir() -> Path:
     return xdg_config_home() / APP_NAME
 
 
+def config_path() -> Path:
+    return config_dir() / "config.toml"
+
+
 def data_dir() -> Path:
     return xdg_data_home() / APP_NAME
 
@@ -81,6 +85,22 @@ def write_default_config(overwrite: bool = False) -> None:
 
 [daemon]
 socket = "auto"
+
+[embedding]
+enabled = false
+backend = "hash"
+model = "all-MiniLM-L6-v2"
+
+[ranking.weights]
+fts_bm25 = 1.0
+recency = 0.3
+project_match = 0.4
+pinned_boost = 0.5
+error_boost = 0.2
+source_boost = 0.1
+embedding = 0.0
+embedding_threshold = 0.3
+recency_half_life_days = 30.0
 
 [retention]
 sessions_days = 30

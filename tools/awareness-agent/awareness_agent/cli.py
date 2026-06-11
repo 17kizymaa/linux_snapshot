@@ -13,6 +13,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .config import apply_runtime_config
+from .mcp import serve_forever as serve_mcp_forever
 from .paths import ensure_dirs, log_path, pid_path, secure_chmod, socket_path, write_default_config
 from .protocol import handle_request
 from .server import serve_forever
@@ -60,6 +62,7 @@ def call(method: str, params: dict[str, Any] | None = None) -> tuple[Any, bool]:
     try:
         return rpc_call(method, params), True
     except Exception:
+        apply_runtime_config()
         return handle_request(method, params or {}), False
 
 
@@ -75,13 +78,22 @@ def _pid_alive(pid: int) -> bool:
 
 def cmd_init(_args: argparse.Namespace) -> int:
     write_default_config()
+    apply_runtime_config()
     print("initialized awareness-agent config/state")
     return 0
 
 
 def cmd_serve(_args: argparse.Namespace) -> int:
     write_default_config()
+    apply_runtime_config()
     asyncio.run(serve_forever())
+    return 0
+
+
+def cmd_mcp_serve(_args: argparse.Namespace) -> int:
+    write_default_config()
+    apply_runtime_config()
+    asyncio.run(serve_mcp_forever())
     return 0
 
 
@@ -95,6 +107,7 @@ def cmd_start(_args: argparse.Namespace) -> int:
     except Exception:
         pass
 
+    apply_runtime_config()
     ensure_dirs()
     pkg_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
@@ -292,6 +305,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="run daemon in foreground")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("mcp", help="run the stdio MCP façade")
+    p.set_defaults(func=cmd_mcp_serve)
 
     p = sub.add_parser("start", help="start daemon in background")
     p.set_defaults(func=cmd_start)

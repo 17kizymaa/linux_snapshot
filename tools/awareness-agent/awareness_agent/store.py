@@ -25,6 +25,9 @@ _EMBEDDINGS_ENABLED = False
 # Global config: embedding backend mode (default: hash)
 _EMBEDDING_BACKEND = "hash"
 
+# Global config: sentence-transformers model name/path (default local cached model)
+_EMBEDDING_MODEL: str | None = "all-MiniLM-L6-v2"
+
 
 def set_embeddings_enabled(enabled: bool) -> None:
     """Enable or disable embedding computation at remember() time.
@@ -55,6 +58,17 @@ def set_embedding_backend(backend: str) -> None:
 def embedding_backend() -> str:
     """Return the current embedding backend mode."""
     return _EMBEDDING_BACKEND
+
+
+def set_embedding_model(model_name: str | None) -> None:
+    """Set the optional sentence-transformers model name or local path."""
+    global _EMBEDDING_MODEL
+    _EMBEDDING_MODEL = model_name
+
+
+def embedding_model() -> str | None:
+    """Return the current sentence-transformers model name or local path."""
+    return _EMBEDDING_MODEL
 
 
 SCHEMA = """
@@ -226,7 +240,7 @@ class AwarenessStore:
             try:
                 from .embeddings import embed_text
                 embedding_text = f"{decision} {redact_text(rationale)} {redact_text(context)}".strip()
-                embedding_result = embed_text(embedding_text, backend=_EMBEDDING_BACKEND)
+                embedding_result = embed_text(embedding_text, backend=_EMBEDDING_BACKEND, model_name=_EMBEDDING_MODEL)
             except Exception:
                 embedding_result = None  # fail-closed: no embedding, no error
 
@@ -300,7 +314,7 @@ class AwarenessStore:
         if _EMBEDDINGS_ENABLED and query.strip():
             try:
                 from .embeddings import embed_text
-                query_embedding = embed_text(query, backend=_EMBEDDING_BACKEND)
+                query_embedding = embed_text(query, backend=_EMBEDDING_BACKEND, model_name=_EMBEDDING_MODEL)
             except Exception:
                 query_embedding = None  # fail-closed
 
@@ -349,7 +363,7 @@ class AwarenessStore:
         current_backend = _EMBEDDING_BACKEND
         try:
             from .embeddings import resolve_backend
-            effective_backend = resolve_backend(current_backend)
+            effective_backend = resolve_backend(current_backend, _EMBEDDING_MODEL)
         except Exception:
             effective_backend = "hash"
 
@@ -400,7 +414,7 @@ class AwarenessStore:
 
             try:
                 text = f"{row['decision']} {row['rationale']} {row['context']}".strip()
-                emb = embed_text(text, backend=current_backend)
+                emb = embed_text(text, backend=current_backend, model_name=_EMBEDDING_MODEL)
                 self.conn.execute(
                     """
                     UPDATE decisions
