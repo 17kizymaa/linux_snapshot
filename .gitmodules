@@ -10,3 +10,6 @@
 [submodule "last30days-skill"]
 	path = last30days-skill
 	url = https://github.com/mvanhorn/last30days-skill.git
+[submodule "server_ops"]
+	path = server_ops
+	url = ./server_ops

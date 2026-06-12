@@ -90,4 +90,3 @@ data/fastembed_cache/
 nltk_data/
 licenses/
 odysseus-ui.service
-server_ops/
